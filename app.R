@@ -1,15 +1,3 @@
-# Suburb similarity explorer
-#
-# match score per (suburb_a, suburb_b) is the mean of selected characteristics
-# after per-dim transformation:
-#   similar    : raw_score
-#   between    : max(0, 1 - 2|raw_score - median_a|)   median per (suburb_a, dim)
-#   dissimilar : 1 - raw_score
-#
-# Defaults: all 12 characteristics selected, all "similar"; top 100; NSW/VIC/QLD.
-# Initial reference: Abbotsford VIC (20002).
-# Settings modal commits on Apply; Close discards modal changes.
-
 library(arrow)
 library(tidyverse)
 library(sf)
@@ -128,9 +116,25 @@ default_ref_code       <- "20002"   # Abbotsford VIC
 
 # ===== Load data ==========================================================
 
-ref        <- read_parquet("data/other/ref_suburb_sa4.parquet") |> 
+# Cloudflare R2 connection. Credentials come from .Renviron locally and
+# from environment variables in Posit Connect Cloud.
+r2 <- arrow::S3FileSystem$create(
+  access_key = Sys.getenv("R2_ACCESS_KEY"),
+  secret_key = Sys.getenv("R2_SECRET_KEY"),
+  endpoint_override = Sys.getenv("R2_ENDPOINT"),
+  scheme = "https"
+)
+# Helper: build R2 paths rooted at the bucket so call sites stay short.
+r2_path <- function(...) {
+  r2$path(paste(Sys.getenv("R2_BUCKET"), ..., sep = "/"))
+}
+
+ref        <- read_parquet(r2_path("other/ref_suburb_sa4.parquet")) |>
   as_tibble() |>
   mutate(suburb_code_2021 = as.character(suburb_code_2021))
+# Shapefiles stay as local-repo reads — they're committed alongside the
+# code in data/other/ since they're small and static. Only the larger,
+# more volatile parquet data lives on R2.
 shp_suburb <- readRDS("data/other/shp_suburb") |> st_transform(4326)
 shp_state  <- readRDS("data/other/shp_state")  |> st_transform(4326)
 shp_gcc    <- readRDS("data/other/shp_gcc")    |> st_transform(4326)
@@ -147,7 +151,7 @@ local({
 
 # Per-suburb categorical labels used for inline filters in the title row.
 # Has columns: suburb_code_2021, cat_remote, cat_terrain, cat_coast.
-suburb_filters <- read_parquet("data/other/suburb_filters.parquet") |> 
+suburb_filters <- read_parquet(r2_path("other/suburb_filters.parquet")) |>
   as_tibble() |>
   mutate(across(c(cat_remote, suburb_code_2021, cat_terrain, cat_coast), as.character)) 
 
@@ -195,7 +199,7 @@ gcc_lookup_full   <- setNames(ref$gcc_name_2021,   ref$suburb_code_2021)
 # suburb_code_2021. Built once offline and saved as a single parquet file —
 # faster startup than fourteen separate qreads + full_joins, and ready for
 # direct read from object storage (R2 / S3) when the app is deployed there.
-suburb_info <- arrow::read_parquet("data/explanatory/suburb_info.parquet") |>
+suburb_info <- arrow::read_parquet(r2_path("explanatory/suburb_info.parquet")) |>
   as_tibble() |>
   mutate(suburb_code_2021 = as.character(suburb_code_2021))
 
@@ -236,7 +240,7 @@ region_tree <- ref |>
 # match then averages over available characteristics per pair.
 load_raw <- function(code) {
   raw_list <- map(sim_dirs, function(d) {
-    open_dataset(file.path("data", "similarity", paste0("sim_", d))) |>
+    open_dataset(r2_path("similarity", paste0("sim_", d))) |>
       filter(suburb_a == code) |>
       select(-any_of("part"), -suburb_a) |>
       collect() |>
@@ -258,8 +262,7 @@ compute_dream_raw <- function(theme_refs) {
     refs <- theme_refs[[theme]]
     if (!length(refs)) next
     for (d in dream_theme_dims[[theme]]) {
-      ds <- open_dataset(file.path("data", "similarity",
-                                   paste0("sim_", d))) |>
+      ds <- open_dataset(r2_path("similarity", paste0("sim_", d))) |>
         filter(suburb_a %in% refs) |>
         select(-any_of("part"), -suburb_a) |>
         collect() |>
@@ -604,7 +607,7 @@ build_info_panel <- function(code, ref_code = NULL, show_header = TRUE,
       tags$span(style = "font-size:16px; font-weight:bold;",
                 sprintf("%s, %s", name, abbr)),
       tags$span(style = "font-size:11px; color:#999;",
-                if (is_ref) "your current reference suburb"
+                if (is_ref) "Current reference suburb"
                 else "click any suburb on the map to update"))
   } else NULL
 
@@ -866,9 +869,10 @@ ui <- function(request) fluidPage(
         # Centred selectors (existing .row-align block)
         div(class = "row-align",
             style = "justify-content: center; margin: 0;",
-          div(class = "inline-topn", style = "width:78px;",
+            tags$span("Show ", style = "font-size:14px;"),
+          div(class = "inline-topn", style = "width:60px;",
               numericInput("top_n_input_inline", NULL,
-                           value = 20, min = 1, step = 1, width = "78px")),
+                           value = 20, min = 1, step = 1, width = "100%")),
           tags$span("suburbs similar to", style = "font-size:14px;"),
           div(style = "min-width:240px; flex:0 1 auto; max-width:460px;",
               virtualSelectInput("ref_sub", NULL,
@@ -2468,18 +2472,6 @@ server <- function(input, output, session) {
       tags$div(style = "font-size: 11px; color: #333; margin-bottom: 2px;",
                sprintf("Composite match: %.0f%%", match_val * 100)),
       chart_svg)
-  }
-
-  load_mini_map_svg <- function(code) {
-    path <- file.path("data", "other", "mini_maps", paste0(code, ".svg"))
-    if (file.exists(path)) {
-      HTML(paste(readLines(path, warn = FALSE), collapse = "\n"))
-    } else {
-      tags$div(style = "width:100%; height:160px; display:flex;
-                        align-items:center; justify-content:center;
-                        background:#f7f7f7; color:#888; font-size:11px;",
-               "Map not available")
-    }
   }
 
   output$list_view <- renderUI({
