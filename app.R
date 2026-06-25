@@ -1,9 +1,24 @@
+# ─────────────────────────────────────────────────────────────────────────
+# Australian suburb similarity explorer
+#
+# match score per (suburb_a, suburb_b) is the mean of selected characteristics
+# after per-dim transformation:
+#   similar    : raw_score
+#   between    : max(0, 1 - 2|raw_score - median_a|)   median per (suburb_a, dim)
+#   dissimilar : 1 - raw_score
+#
+# Defaults: all 12 characteristics selected, all "similar"; top 100; NSW/VIC/QLD.
+# Initial reference: Abbotsford VIC (20002).
+# Settings modal commits on Apply; Close discards modal changes.
+# ─────────────────────────────────────────────────────────────────────────
+
 library(arrow)
 library(tidyverse)
 library(sf)
 library(leaflet)
 library(shiny)
 library(shinyWidgets)
+library(svglite)            # in-memory SVG rendering for list-view per-row charts
 library(forcats)            # factor ordering in chart
 library(bslib)              # Bootstrap 5 base theme
 library(shinycssloaders)    # spinner overlays for slow outputs
@@ -415,11 +430,12 @@ fmt_pct <- function(pct) {
 build_realestate_url <- function(suburb_name, state_abbr_value) {
   # Strip any parenthetical suffix defensively (most names are already clean)
   name_clean <- sub("\\s*\\([^()]*\\)\\s*$", "", suburb_name)
-  slug <- name_clean |>
-    tolower() |>
-    gsub("[^a-z0-9 ]", "", x = _) |>
-    gsub("\\s+", "+",        x = _) |>
-    trimws()
+  # Build the slug with sequential assignments rather than the R 4.2+
+  # placeholder-pipe syntax (`x = _`) since the deployment target runs R 4.1.
+  slug <- tolower(name_clean)
+  slug <- gsub("[^a-z0-9 ]", "", slug)
+  slug <- gsub("\\s+",       "+", slug)
+  slug <- trimws(slug)
   sprintf("https://www.realestate.com.au/buy/in-%s,+%s/list-1?activeSort=list-date&includeSurrounding=false",
           slug, tolower(state_abbr_value))
 }
@@ -2472,6 +2488,18 @@ server <- function(input, output, session) {
       tags$div(style = "font-size: 11px; color: #333; margin-bottom: 2px;",
                sprintf("Composite match: %.0f%%", match_val * 100)),
       chart_svg)
+  }
+
+  load_mini_map_svg <- function(code) {
+    path <- file.path("data", "other", "mini_maps", paste0(code, ".svg"))
+    if (file.exists(path)) {
+      HTML(paste(readLines(path, warn = FALSE), collapse = "\n"))
+    } else {
+      tags$div(style = "width:100%; height:160px; display:flex;
+                        align-items:center; justify-content:center;
+                        background:#f7f7f7; color:#888; font-size:11px;",
+               "Map not available")
+    }
   }
 
   output$list_view <- renderUI({
