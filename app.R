@@ -1,17 +1,3 @@
-# ─────────────────────────────────────────────────────────────────────────
-# Australian suburb similarity explorer
-#
-# match score per (suburb_a, suburb_b) is the mean of selected characteristics
-# after per-dim transformation:
-#   similar    : raw_score
-#   between    : max(0, 1 - 2|raw_score - median_a|)   median per (suburb_a, dim)
-#   dissimilar : 1 - raw_score
-#
-# Defaults: all 12 characteristics selected, all "similar"; top 100; NSW/VIC/QLD.
-# Initial reference: Abbotsford VIC (20002).
-# Settings modal commits on Apply; Close discards modal changes.
-# ─────────────────────────────────────────────────────────────────────────
-
 library(arrow)
 library(tidyverse)
 library(sf)
@@ -1943,6 +1929,7 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$map_zoom, {
+    #req(input$map_bounds)
     z <- input$map_zoom %||% "auto"
     if (z == "auto") {
       d <- map_data()
@@ -1983,10 +1970,11 @@ server <- function(input, output, session) {
   # --- Redraw data layers when map_data changes --------------------------
   observeEvent(map_data(), {
     d <- map_data()
+    #req(input$map_bounds)
     proxy <- leafletProxy("map") |>
       clearGroup("matches") |> clearGroup("ref") |>
       clearGroup("sa4") |> clearGroup("clickpop") |> clearControls()
-
+    
     if (is.null(d) || nrow(d) == 0) {
       showNotification("No suburbs to show. Trying widening the region selection or changing settings.", type = "warning")
       return()
@@ -2001,7 +1989,7 @@ server <- function(input, output, session) {
                  by = c("suburb_code_2021" = "suburb_b")) |>
       mutate(suburb_name_2021 = coalesce(unname(suburb_code_to_name[suburb_code_2021]),
                                           suburb_name_2021))
-
+    
     ref_poly <- shp_suburb |>
       filter(suburb_code_2021 %in% current_ref()) |>
       mutate(suburb_name_2021 = coalesce(unname(suburb_code_to_name[suburb_code_2021]),
@@ -2488,18 +2476,6 @@ server <- function(input, output, session) {
       tags$div(style = "font-size: 11px; color: #333; margin-bottom: 2px;",
                sprintf("Composite match: %.0f%%", match_val * 100)),
       chart_svg)
-  }
-
-  load_mini_map_svg <- function(code) {
-    path <- file.path("data", "other", "mini_maps", paste0(code, ".svg"))
-    if (file.exists(path)) {
-      HTML(paste(readLines(path, warn = FALSE), collapse = "\n"))
-    } else {
-      tags$div(style = "width:100%; height:160px; display:flex;
-                        align-items:center; justify-content:center;
-                        background:#f7f7f7; color:#888; font-size:11px;",
-               "Map not available")
-    }
   }
 
   output$list_view <- renderUI({
