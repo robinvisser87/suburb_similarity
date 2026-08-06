@@ -236,45 +236,36 @@ region_tree <- ref |>
 
 # ===== Helpers ============================================================
 
-# Load all raw_* for one reference suburb across the 12 sim_ folders.
-# Uses full_join so partial-coverage dims (voting) keep NA cells; the
-# match then averages over available characteristics per pair.
+# Load all raw_* for one reference suburb 
 load_raw <- function(code) {
-  raw_list <- map(sim_dirs, function(d) {
-    open_dataset(r2_path("similarity", paste0("sim_", d))) |>
-      filter(suburb_a == code) |>
-      select(-any_of("part"), -suburb_a) |>
-      collect() |>
-      as_tibble()
-  })
-  reduce(raw_list, full_join, by = "suburb_b")
+  read_parquet(r2_path("similarity/by_source", paste0(code, ".parquet"))) |>
+    as_tibble()
 }
 
 # Dream-suburb variant: takes a list with elements `people`, `urban`,
-# `nature` each holding a vector of reference suburb codes. For each dim,
-# reads from its theme's references and averages across them. Returns a
-# wide tibble shaped like load_raw output: one row per suburb_b plus the
-# raw_<dim> columns from all themes that have references. Dims belonging
-# to a theme with no refs are skipped — composition-wise this matches the
-# user expectation that empty themes simply don't contribute.
+# `nature` each holding a vector of reference suburb codes. 
 compute_dream_raw <- function(theme_refs) {
+  all_refs <- unique(unlist(theme_refs))
+  if (!length(all_refs)) return(NULL)
+  
+  raw_per_ref <- setNames(lapply(all_refs, load_raw), all_refs)
+  
   dim_tables <- list()
   for (theme in names(theme_refs)) {
     refs <- theme_refs[[theme]]
     if (!length(refs)) next
     for (d in dream_theme_dims[[theme]]) {
-      ds <- open_dataset(r2_path("similarity", paste0("sim_", d))) |>
-        filter(suburb_a %in% refs) |>
-        select(-any_of("part"), -suburb_a) |>
-        collect() |>
-        as_tibble()
-      if (!nrow(ds)) next
-      # Average raw_<d> across selected refs per suburb_b
-      ds_avg <- ds |>
-        group_by(suburb_b) |>
-        summarise(across(everything(), \(x) mean(x, na.rm = TRUE)),
-                  .groups = "drop")
-      dim_tables[[d]] <- ds_avg
+      dim_col <- paste0("raw_", d)
+      per_ref <- lapply(refs, function(r) {
+        raw_per_ref[[r]] |> select(suburb_b, all_of(dim_col))
+      })
+      joined <- reduce(per_ref, full_join, by = "suburb_b")
+      avg_df <- joined |>
+        rowwise() |>
+        mutate(!!dim_col := mean(c_across(starts_with(dim_col)), na.rm = TRUE)) |>
+        ungroup() |>
+        select(suburb_b, all_of(dim_col))
+      dim_tables[[d]] <- avg_df
     }
   }
   if (!length(dim_tables)) return(NULL)
@@ -1018,7 +1009,9 @@ ui <- function(request) fluidPage(
 # ===== Server =============================================================
 
 server <- function(input, output, session) {
-
+  # add a cache
+  raw_cache <- new.env(parent = emptyenv())
+  
   # Active state — commits via Apply (modal) or picker/map-click (ref).
   current_ref     <- reactiveVal(default_ref_code)
   settings_active <- reactiveVal(default_settings)
@@ -1338,13 +1331,21 @@ server <- function(input, output, session) {
   })
 
   # --- Raw scores (parquet read; refreshes when ref changes) -------------
+  # cached version
   # With multi-ref support, returns a NAMED LIST of wide tables: one per
   # reference suburb. Each table has raw_* columns for every characteristic.
   raw_scores <- reactive({
     codes <- current_ref(); req(length(codes) > 0)
-    setNames(map(codes, load_raw), codes)
+    setNames(lapply(codes, function(code) {
+      cached <- raw_cache[[code]]
+      if (is.null(cached)) {
+        cached <- load_raw(code)
+        raw_cache[[code]] <- cached
+      }
+      cached
+    }), codes)
   })
-
+  
   # Per-reference medians: a named list keyed by reference code, each holding
   # a named vector of per-dim medians for that reference's raw_score table.
   # Used as the anchor for "Somewhat different" scoring — each reference has

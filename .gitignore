@@ -3,3 +3,8 @@
 .RData
 .Ruserdata
 .Renviron
+dataprep
+data/explanatory
+data/similarity
+data/other/ref_suburb_sa4.parquet
+data/other/suburb_filters.parquet
