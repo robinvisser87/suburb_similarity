@@ -1558,9 +1558,9 @@ server <- function(input, output, session) {
       is_filtered <- d %in% filtered_dims
 
       div(class = "dim-row",
-          style = "display:flex; align-items:center; gap:10px;
+          style = "display:flex; align-items:center; gap:6px;
                    margin:0; padding:2px 0;",
-        div(style = "width: 240px;",
+        div(style = "width: 190px; flex-shrink: 0;",
           # right = TRUE puts the switch on the left, label on the right
           materialSwitch(paste0("dim_check_", d),
                          label = dim_labels[d],
@@ -1573,7 +1573,7 @@ server <- function(input, output, session) {
         } else {
           conditionalPanel(
             condition = sprintf("input.dim_check_%s == true", d),
-            div(style = "flex: 1;",
+            div(style = "flex: 1; min-width: 0;",
               radioButtons(paste0("dim_target_", d), NULL,
                            choices = c("Similar"          = "similar",
                                        "Mostly similar"   = "mostly_similar",
@@ -1591,12 +1591,16 @@ server <- function(input, output, session) {
       lapply(people_ordered, build_row))
 
     modalDialog(
-      title = "Match settings", easyClose = FALSE, size = "l",
+      title = "Match settings", easyClose = FALSE, size = "xl",
       tags$style(HTML(
-        ".dim-row .radio-inline { margin: 0 8px 0 0; padding-top: 0; }
+        ".dim-row .radio-inline { margin: 0 6px 0 0; padding-top: 0;
+                                   font-size: 11.5px; white-space: nowrap; }
          .dim-row .form-group   { margin-bottom: 0; }
-         .dim-row .shiny-options-group { margin-top: 0; }
-         .dim-row .bootstrap-switch { margin-right: 6px; }
+         .dim-row .shiny-options-group { margin-top: 0; display: flex;
+                                          flex-wrap: nowrap; white-space: nowrap; }
+         .dim-row .bootstrap-switch { margin-right: 4px; }
+         .dim-row label { font-size: 12.5px; white-space: nowrap;
+                           overflow: hidden; text-overflow: ellipsis; }
         "
       )),
       tags$label("Focus:"),
