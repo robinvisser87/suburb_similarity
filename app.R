@@ -1560,7 +1560,7 @@ server <- function(input, output, session) {
       div(class = "dim-row",
           style = "display:flex; align-items:center; gap:6px;
                    margin:0; padding:2px 0;",
-        div(style = "width: 190px; flex-shrink: 0;",
+        div(style = "width: 215px; flex-shrink: 0;",
           # right = TRUE puts the switch on the left, label on the right
           materialSwitch(paste0("dim_check_", d),
                          label = dim_labels[d],
@@ -1598,9 +1598,8 @@ server <- function(input, output, session) {
          .dim-row .form-group   { margin-bottom: 0; }
          .dim-row .shiny-options-group { margin-top: 0; display: flex;
                                           flex-wrap: nowrap; white-space: nowrap; }
-         .dim-row .bootstrap-switch { margin-right: 4px; }
-         .dim-row label { font-size: 12.5px; white-space: nowrap;
-                           overflow: hidden; text-overflow: ellipsis; }
+         .dim-row .bootstrap-switch { margin-right: 4px; flex-shrink: 0; }
+         .dim-row label { font-size: 12.5px; white-space: nowrap; }
         "
       )),
       tags$label("Focus:"),
