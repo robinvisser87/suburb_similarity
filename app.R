@@ -14,7 +14,9 @@ library(shinycssloaders)    # spinner overlays for slow outputs
 sim_dirs <- c("coast", 'density', "diversity", "employment", "housing", "landcover",
               "people", 'remoteness', "socioeconomic", "terrain", "vegetation",
               "voting", "water",
-              "weather")
+              "weather",
+              "dining", "transport", "food", "culture", "communityinfra",
+              "tertiary", "health", "kinder", "schools")
 
 all_dim_codes    <- sim_dirs
 default_settings <- setNames(rep("similar", length(all_dim_codes)), all_dim_codes)
@@ -49,14 +51,17 @@ place_dims  <- setdiff(all_dim_codes, people_dims)
 # fabric/economy combined ("a busy place to work and live") rather than
 # household socioeconomics.
 dream_theme_dims <- list(
-  people = c("voting", "people", "diversity", "socioeconomic"),
-  urban  = c("remoteness", "employment", "housing", "landcover", "density"),
-  nature = c("water", "weather", "terrain", "vegetation", "coast")
+  people    = c("voting", "people", "diversity", "socioeconomic"),
+  urban     = c("remoteness", "employment", "housing", "landcover", "density"),
+  nature    = c("water", "weather", "terrain", "vegetation", "coast"),
+  amenities = c("dining", "transport", "food", "culture", "communityinfra",
+                "tertiary", "health", "kinder", "schools")
 )
 dream_theme_labels <- c(
-  people = "People & culture",
-  urban  = "Urban fabric & economy",
-  nature = "Nature & climate")
+  people    = "People & culture",
+  urban     = "Urban fabric & economy",
+  nature    = "Nature & climate",
+  amenities = "Amenities")
 
 # Preset focus weights — (w_people, w_place) applied to the group means
 # when computing the match. Balanced = plain rowMeans across selected
@@ -83,12 +88,24 @@ dim_labels <- c(
   socioeconomic = "Socioeconomic",  terrain = "Terrain",
   vegetation = "Vegetation",        voting = "Voting",
   water = "Water presence",
-  weather = "Weather"
+  weather = "Weather",
+  dining = "Dining",
+  transport = "Public transport",
+  food = "Fresh food",
+  culture = "Cultural amenities",
+  communityinfra = "Community infrastructure",
+  tertiary = "Tertiary education",
+  health = "Health infrastructure",
+  kinder = "Kinder",
+  schools = "Schools"
 )
 
-# Cohesive 14-colour palette: Polychrome-derived, designed for high-cardinality
+# Cohesive 23-colour palette: Polychrome-derived, designed for high-cardinality
 # categorical encodings with strong perceptual separation between adjacent
-# hues. Reasonably colourblind-friendly across types.
+# hues. Reasonably colourblind-friendly across types. The original 14 (geo/
+# people/place dims) keep their existing colours; the 9 amenity dims added
+# below use a distinct sub-palette so the new "Amenities" group reads as its
+# own visual family in charts that mix both sets.
 dim_colors <- c(
   coast         = "#5A5156",   # graphite (geographic)
   density       = "#E4761B",   # orange (settlement intensity)
@@ -103,7 +120,16 @@ dim_colors <- c(
   vegetation    = "#2ED9FF",   # cyan (botany)
   voting        = "#B00068",   # crimson (political)
   water         = "#325A9B",   # navy (hydrology)
-  weather       = "#85660D"    # olive (climate)
+  weather       = "#85660D",   # olive (climate)
+  dining        = "#C4451C",   # burnt orange (hospitality)
+  transport     = "#90AD1C",   # olive-lime (mobility)
+  food          = "#FBE426",   # yellow (fresh food)
+  culture       = "#AA0DFE",   # violet (arts)
+  communityinfra= "#F6222E",   # red (civic)
+  tertiary      = "#B10DA1",   # magenta-purple (education)
+  health        = "#FF6E54",   # coral (wellbeing)
+  kinder        = "#7ED7D1",   # teal (early years)
+  schools       = "#00B5F7"    # sky blue (education)
 )
 
 state_abbr <- c("New South Wales" = "NSW", "Victoria" = "VIC", "Queensland" = "QLD",
@@ -243,7 +269,7 @@ load_raw <- function(code) {
 }
 
 # Dream-suburb variant: takes a list with elements `people`, `urban`,
-# `nature` each holding a vector of reference suburb codes. 
+# `nature`, `amenities` each holding a vector of reference suburb codes. 
 compute_dream_raw <- function(theme_refs) {
   all_refs <- unique(unlist(theme_refs))
   if (!length(all_refs)) return(NULL)
@@ -1028,7 +1054,8 @@ server <- function(input, output, session) {
   cat_remote_filter  <- reactiveVal(character(0))
 
   # Dream-suburb mode. Holds a list:
-  #   theme_refs   = list(people = chr[], urban = chr[], nature = chr[])
+  #   theme_refs   = list(people = chr[], urban = chr[], nature = chr[],
+  #                       amenities = chr[])
   #   filter_state = "" or a state name
   #   filter_coast = TRUE / FALSE
   # NULL when not active (default single-reference mode).
@@ -1716,8 +1743,8 @@ server <- function(input, output, session) {
   })
 
   # ===== Dream-suburb mode ================================================
-  # Modal lets the user pick reference suburbs for each of three themes
-  # (people, urban, nature) plus optional hard filters. On Apply, the
+  # Modal lets the user pick reference suburbs for each of four themes
+  # (people, urban, nature, amenities) plus optional hard filters. On Apply, the
   # dream_refs_active reactiveVal is set and match_df switches branch to
   # the dream computation. A banner above the view shows what blend is
   # currently active and offers a "back to single reference" link.
@@ -1758,6 +1785,9 @@ server <- function(input, output, session) {
       theme_picker("nature", "Nature & climate",
                    "water, weather, terrain, vegetation, coast",
                    pre$nature),
+      theme_picker("amenities", "Amenities",
+                   "dining, public transport, fresh food, cultural amenities, community infrastructure, tertiary education, health infrastructure, kinder, schools",
+                   pre$amenities),
       tags$hr(style = "margin: 8px 0;"),
       tags$label(style = "font-size: 11px; font-weight: 600;
                           letter-spacing: 0.5px; color: #555;
@@ -1785,9 +1815,10 @@ server <- function(input, output, session) {
 
   observeEvent(input$apply_dream, {
     theme_refs <- list(
-      people = input$dream_people_refs %||% character(0),
-      urban  = input$dream_urban_refs  %||% character(0),
-      nature = input$dream_nature_refs %||% character(0))
+      people    = input$dream_people_refs    %||% character(0),
+      urban     = input$dream_urban_refs     %||% character(0),
+      nature    = input$dream_nature_refs    %||% character(0),
+      amenities = input$dream_amenities_refs %||% character(0))
 
     if (!length(unlist(theme_refs))) {
       showNotification("Pick at least one reference suburb in any theme.",
@@ -1824,9 +1855,10 @@ server <- function(input, output, session) {
     }
 
     bits <- list(
-      people = label_refs(dream$theme_refs$people),
-      urban  = label_refs(dream$theme_refs$urban),
-      nature = label_refs(dream$theme_refs$nature))
+      people    = label_refs(dream$theme_refs$people),
+      urban     = label_refs(dream$theme_refs$urban),
+      nature    = label_refs(dream$theme_refs$nature),
+      amenities = label_refs(dream$theme_refs$amenities))
     bits <- compact(bits)
 
     pieces <- imap(bits, function(refs, theme) {
@@ -1862,13 +1894,13 @@ server <- function(input, output, session) {
       title = "How does this work?",
       easyClose = TRUE, size = "l",
       tags$h5("What is a match score?"),
-      tags$p("Each pair of suburbs is compared across 14 characteristics covering ",
-             "geography, environment, demographics, and politics. ",
+      tags$p("Each pair of suburbs is compared across 23 characteristics covering ",
+             "geography, environment, demographics, politics, and local amenities. ",
              "A per-characteristic match score is computed from the underlying data ",
              "(using Bray-Curtis or scaled-Euclidean distance, depending on the ",
              "characteristic). A score of 1 means identical on that ",
              "characteristic; 0 means as different as possible."),
-      tags$h5("The 14 characteristics"),
+      tags$h5("The 23 characteristics"),
       tags$div(style = "font-size: 12px;",
         tags$p(tags$b("People-group: "),
           "people (age, household composition), socioeconomic (income, ",
@@ -1880,7 +1912,12 @@ server <- function(input, output, session) {
           "coast (distance bands to coastline), terrain (slope, elevation), ",
           "vegetation (cover types from Digital Earth Australia), ",
           "water (rivers, lakes, hydrology), weather (temperature, rainfall ",
-          "grids), landcover (mesh-block land use composition).")),
+          "grids), landcover (mesh-block land use composition), and nine ",
+          "amenity-access characteristics — public transport, health ",
+          "infrastructure, tertiary education, community infrastructure, ",
+          "cultural amenities, fresh food, dining, schools, and kinder — ",
+          "each measured by average distance to and count of nearby ",
+          "facilities (from OpenStreetMap).")),
       tags$h5("How the match is calculated"),
       tags$p("Each characteristic's raw similarity is transformed by your chosen ",
              "target: ", tags$b("Similar"), " = peak at 1.0 (highest similarity), ",
