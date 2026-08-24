@@ -745,7 +745,9 @@ ui <- function(request) fluidPage(
   theme = bs_theme(version = 5,
                    primary = "#2c7fb8",
                    base_font = font_google("Inter")),
-  tags$head(tags$style(HTML("
+  tags$head(
+    tags$meta(name = "viewport", content = "width=device-width, initial-scale=1"),
+    tags$style(HTML("
   /* Compact the inline numericInput */
   .inline-topn .form-group { margin-bottom: 0; }
   .inline-topn input.form-control { padding: 4px 6px; height: 34px; }
@@ -801,6 +803,81 @@ ui <- function(request) fluidPage(
 .row-align .btn.dropdown-toggle .caret,
 .row-align .btn.action-button .caret {
   margin-left: 4px;
+}
+
+/* ===== Mobile responsive overrides ===== */
+@media (max-width: 768px) {
+  /* Map + side info panel: stack instead of sitting side by side */
+  .main-view-row { flex-direction: column !important; }
+  .main-view-row > div:last-child {
+    flex: 1 1 auto !important;
+    width: 100% !important;
+    max-width: none !important;
+    max-height: 320px !important;
+  }
+
+  /* Top-10 panel: drop out of the map overlay and become a normal
+     block sitting below the map, instead of floating on top of it
+     and eating scarce screen space. !important beats Shiny's inline
+     position:absolute styling. */
+  .top10-panel {
+    position: static !important;
+    width: 100% !important;
+    left: auto !important;
+    right: auto !important;
+    bottom: auto !important;
+    top: auto !important;
+    transform: none !important;
+    margin-top: 8px;
+    box-shadow: none !important;
+    border: 1px solid #e0e0e0;
+    max-height: 260px;
+    overflow-y: auto;
+  }
+
+  /* Settings-modal dim rows: switch + radios no longer fit one line —
+     let the radio group drop to its own line under the switch. */
+  .dim-row { flex-wrap: wrap; }
+  .dim-row > div:first-child { width: 100% !important; }
+
+  /* Header: title + icon buttons no longer fit one row */
+  .header-row { flex-wrap: wrap; row-gap: 6px; }
+  .header-row h3 { order: -1; width: 100%; text-align: center; }
+
+  /* Row-2 selectors ('Show N suburbs similar to...'): drop the
+     side-spacer centering trick and let items wrap onto their own
+     lines instead of overflowing off the right edge of the screen. */
+  .selector-row { flex-direction: column !important; }
+  .selector-row > div:first-child { display: none; }  /* drop left spacer */
+  .selector-row > div:last-child {
+    flex: 0 0 auto !important;
+    justify-content: center !important;
+    margin-top: 6px;
+  }
+  .row-align { justify-content: flex-start !important; }
+  .row-align > div[style*='min-width:240px'] {
+    min-width: 0 !important;
+    max-width: none !important;
+    width: 100% !important;
+    flex: 1 1 100% !important;
+  }
+
+  /* Map: fixed 680px is too tall on a short mobile viewport (leaves the
+     rest of the page off-screen) and can also be cramped in landscape.
+     Scale to viewport height instead. */
+  .map-container, .map-container .leaflet-container {
+    height: 60vh !important;
+    min-height: 320px;
+  }
+
+  /* Icon-only header buttons: bump to a ~44px touch target (Apple/Google
+     minimum tap-target guidance) rather than the tighter desktop sizing. */
+  .header-row .btn {
+    min-width: 44px;
+    min-height: 44px;
+    padding: 8px 10px;
+  }
+}
 ")),
   tags$script(HTML("
     // Update the Filters dropdown button label with the active count
@@ -837,6 +914,7 @@ ui <- function(request) fluidPage(
   fluidRow(
     column(width = 12,
       tags$div(
+        class = "header-row",
         style = "display: flex; align-items: center; margin-top: 10px;
                  margin-bottom: 6px;",
         # Left spacer to balance the right cluster's width
@@ -882,6 +960,7 @@ ui <- function(request) fluidPage(
   fluidRow(
     column(width = 12,
       tags$div(
+        class = "selector-row",
         style = "display: flex; align-items: flex-start; margin: 6px 0 4px;",
         # Left spacer
         tags$div(style = "flex: 1;"),
@@ -1001,15 +1080,18 @@ ui <- function(request) fluidPage(
   uiOutput("similarity_overview"),
 
   conditionalPanel(condition = "input.view_mode == 'map'",
-    div(style = "display: flex; gap: 12px; align-items: stretch;",
+    div(class = "main-view-row",
+        style = "display: flex; gap: 12px; align-items: stretch;",
       # ----- Map (flexes to fill remaining width) -----
       div(style = "flex: 1 1 auto; min-width: 0; position: relative;",
-        withSpinner(leafletOutput("map", height = 680),
-                    type = 4, color = "#2c7fb8", size = 0.8,
-                    caption = "Finding matches"),
+        div(class = "map-container",
+          withSpinner(leafletOutput("map", height = 680),
+                      type = 4, color = "#2c7fb8", size = 0.8,
+                      caption = "Finding matches")),
         # bottom-left floating panel: top-10 contribution bars
         absolutePanel(
           bottom = 24, left = 12, width = 380, draggable = TRUE,
+          class = "top10-panel",
           style = paste("background: rgba(255,255,255,0.92); padding: 8px;",
                         "border-radius: 6px; box-shadow: 0 1px 4px rgba(0,0,0,0.3); z-index: 1000;",
                         "overflow: visible;"),
@@ -1532,11 +1614,18 @@ server <- function(input, output, session) {
       if (length(cat_remote_filter())  > 0) "remoteness" else NULL
     )
 
-    # Sort: all place dims first (alphabetised), then all people dims.
-    # One group header chip at the top of each section.
-    place_ordered  <- intersect(sort(place_dims),  all_dim_codes)
-    people_ordered <- intersect(sort(people_dims), all_dim_codes)
-    ordered_dims   <- c(place_ordered, people_ordered)
+    # Group into the same 4 themes used in the dream-suburb modal, so the
+    # two surfaces stay conceptually consistent. Within each theme, dims
+    # are alphabetised. Amenities (9 items) is the longest group, but still
+    # far more browsable than one flat 23-item list.
+    theme_group_colours <- c(
+      people    = "#1C8356",
+      urban     = "#5A5156",
+      nature    = "#325A9B",
+      amenities = "#B10DA1"
+    )
+    theme_ordered <- lapply(dream_theme_dims, function(dims)
+      intersect(sort(dims), all_dim_codes))
 
     group_header <- function(label, colour) {
       tags$div(
@@ -1544,7 +1633,7 @@ server <- function(input, output, session) {
           "font-size:11px; font-weight:600; letter-spacing:0.5px;
            color:white; background:%s; display:inline-block;
            padding:2px 10px; border-radius:10px;
-           margin: 4px 0 4px 0;", colour),
+           margin: 10px 0 4px 0;", colour),
         toupper(label))
     }
 
@@ -1583,12 +1672,13 @@ server <- function(input, output, session) {
         })
     }
 
-    place_block <- tagList(
-      group_header("place",  "#5A5156"),
-      lapply(place_ordered,  build_row))
-    people_block <- tagList(
-      group_header("people", "#1C8356"),
-      lapply(people_ordered, build_row))
+    theme_blocks <- tagList(
+      lapply(names(dream_theme_dims), function(theme_id) {
+        tagList(
+          group_header(dream_theme_labels[[theme_id]],
+                       theme_group_colours[[theme_id]]),
+          lapply(theme_ordered[[theme_id]], build_row))
+      }))
 
     modalDialog(
       title = "Match settings", easyClose = FALSE, size = "xl",
@@ -1612,13 +1702,13 @@ server <- function(input, output, session) {
         tags$div(style = "font-size: 11px; color: #666; margin-left: 24px;",
           "Adjust how much weight is given to people vs place characteristics. ",
           "People characteristics: age, sex, family composition, socioeconomic, voting, diversity. ",
-          "Place characteristics: everything else.")),
+          "Place characteristics: everything else (urban fabric, nature/climate, and local amenities).")),
       tags$hr(style = "margin: 8px 0;"),
       tags$label("characteristics and how to score them:"),
       div(style = "font-size: 11px; color: #666; margin-bottom: 4px;",
           "Similar = match the reference closely. Mostly similar = somewhat closer than average. ",
           "Mostly different = somewhat further. Different = match as little as possible."),
-      div(style = "margin-top: 6px;", place_block, people_block),
+      div(style = "margin-top: 6px;", theme_blocks),
       footer = tagList(
         actionButton("reset_settings", "Reset"),
         actionButton("apply_settings", "Apply", class = "btn-primary"),
@@ -2459,14 +2549,36 @@ server <- function(input, output, session) {
 
     rows <- lapply(seq_len(nrow(top)), render_row)
 
-    # CSS for hover-reveal: show tooltip when mouse enters the row.
+    # CSS for hover-reveal (desktop) + tap-to-toggle (touch/mobile).
     hover_css <- tags$style(HTML("
       .top10-row:hover { background: #f3f3f3; }
       .top10-row:hover .top10-tooltip { display: block !important; }
+      .top10-row.tt-open .top10-tooltip { display: block !important; }
+      @media (max-width: 768px) {
+        /* On narrow screens the tooltip's left:100% positioning would run
+           off-screen — anchor it below the row instead, full width. */
+        .top10-tooltip {
+          position: static !important;
+          margin: 4px 0 8px 0 !important;
+          min-width: 0 !important;
+          width: 100% !important;
+        }
+      }
+    "))
+    tap_js <- tags$script(HTML("
+      // Hover doesn't fire on touch devices, so give top-10 rows a tap
+      // toggle as a fallback — tapping a row shows/hides its breakdown,
+      // tapping it again (or another row) closes it.
+      $(document).off('click.top10tap').on('click.top10tap', '.top10-row', function(e) {
+        var wasOpen = $(this).hasClass('tt-open');
+        $('.top10-row').removeClass('tt-open');
+        if (!wasOpen) $(this).addClass('tt-open');
+      });
     "))
 
     tagList(
       hover_css,
+      tap_js,
       tags$div(style = "font-weight: bold; font-size: 11px; margin-bottom: 4px;",
                "Top 10 by match score"),
       tags$div(style = "font-size: 9px; color: #888; margin-bottom: 6px;",
