@@ -1126,6 +1126,10 @@ server <- function(input, output, session) {
   focus_active    <- reactiveVal("balanced")   # preset focus weighting
   top_n_active    <- reactiveVal(50)
   region_filter   <- reactiveVal(default_tree_selection)
+  # Server-side source of truth for the "Zoom to" mode, kept in sync with
+  # the map_zoom dropdown but read directly (no UI round-trip) so the
+  # auto-fit check below can never race against a stale/unset input$map_zoom.
+  zoom_mode       <- reactiveVal("auto")
 
   # Suburb whose facts are shown in the info panel (NULL = panel hidden)
   clicked_suburb  <- reactiveVal(NULL)
@@ -1360,6 +1364,12 @@ server <- function(input, output, session) {
     codes <- codes[!is.na(codes) & nzchar(codes)]
     if (length(codes) > 0 && !identical(sort(codes), sort(current_ref()))) {
       current_ref(codes)
+      # A genuinely new reference area should always auto-pan to its new
+      # top-N, even if the user had previously zoomed to a specific state
+      # for a different search. Reset server-side state immediately (no
+      # round-trip lag) and mirror it in the dropdown for the UI to match.
+      zoom_mode("auto")
+      updateSelectInput(session, "map_zoom", selected = "auto")
     }
   }, ignoreInit = TRUE, ignoreNULL = FALSE)
 
@@ -1658,7 +1668,7 @@ server <- function(input, output, session) {
         if (is_filtered) {
           tags$span(
             style = "font-size: 11px; color: #888; font-style: italic;",
-            "filtered above — disabled in match")
+            "filtered above and disabled in match")
         } else {
           conditionalPanel(
             condition = sprintf("input.dim_check_%s == true", d),
@@ -1865,7 +1875,7 @@ server <- function(input, output, session) {
       size = "l", easyClose = TRUE,
       tags$p(style = "font-size: 12px; color: #666;",
         "Pick one or more reference suburbs for each theme. Each theme can ",
-        "draw on different references — e.g. ", tags$em("people like Tecoma"),
+        "draw on different references, for example ", tags$em("people like Tecoma"),
         ", ", tags$em("urban feel like Hawthorn"), ", ",
         tags$em("nature like Sorrento"), ". The results are ranked by how ",
         "well each suburb matches the blend across all themes."),
@@ -2006,9 +2016,9 @@ server <- function(input, output, session) {
           "vegetation (cover types from Digital Earth Australia), ",
           "water (rivers, lakes, hydrology), weather (temperature, rainfall ",
           "grids), landcover (mesh-block land use composition), and nine ",
-          "amenity-access characteristics — public transport, health ",
+          "amenity-access characteristics (public transport, health ",
           "infrastructure, tertiary education, community infrastructure, ",
-          "cultural amenities, fresh food, dining, schools, and kinder — ",
+          "cultural amenities, fresh food, dining, schools, and kinder), ",
           "each measured by average distance to and count of nearby ",
           "facilities (from OpenStreetMap).")),
       tags$h5("How the match is calculated"),
@@ -2023,9 +2033,9 @@ server <- function(input, output, session) {
              ),
       tags$p("The transformed characteristic scores are then aggregated:"),
       tags$ul(
-        tags$li(tags$b("Balanced"), " — simple mean across all selected characteristics."),
-        tags$li(tags$b("People-focused"), " — people-group mean × 0.75 + place-group mean × 0.25."),
-        tags$li(tags$b("Place-focused"), " — opposite weighting (place × 0.75, people × 0.25).")
+        tags$li(tags$b("Balanced"), ": simple mean across all selected characteristics."),
+        tags$li(tags$b("People-focused"), ": people-group mean * 0.75 + place-group mean * 0.25."),
+        tags$li(tags$b("Place-focused"), ": opposite weighting (place * 0.75, people * 0.25).")
       ),
       tags$h5("Multiple reference suburbs"),
       tags$p("When more than one reference is selected: ",
@@ -2056,12 +2066,13 @@ server <- function(input, output, session) {
       choices  = c("Auto (fit results)" = "auto",
                    "Australia"          = "australia",
                    setNames(states, states)),
-      selected = isolate(input$map_zoom) %||% "auto")
+      selected = isolate(zoom_mode()))
   })
 
   observeEvent(input$map_zoom, {
     #req(input$map_bounds)
     z <- input$map_zoom %||% "auto"
+    zoom_mode(z)   # keep the server-side source of truth in sync
     if (z == "auto") {
       d <- map_data()
       if (!is.null(d) && nrow(d) > 0) {
@@ -2203,7 +2214,7 @@ server <- function(input, output, session) {
     # if zoom is in Auto mode, fit to the GCCSA holding the most matches
     # (single dominant cluster usually tells the most useful story).
     # Falls back to the full top-N bbox if no GCC info is available.
-    if ((isolate(input$map_zoom) %||% "auto") == "auto" && nrow(shp_sub) > 0) {
+    if (isolate(zoom_mode()) == "auto" && nrow(shp_sub) > 0) {
       top_gcc <- shp_sub$suburb_code_2021 |>
         (\(codes) gcc_lookup_full[codes])() |>
         unname() |>
@@ -2674,7 +2685,7 @@ server <- function(input, output, session) {
                  if (length(active_filters) > 0) {
                    "Your category filters are excluding every suburb. Try removing one or widening the region selection."
                  } else {
-                   "Try widening your region selection — the current region tree has no allowed suburbs."
+                   "Try widening your region selection."
                  }),
         active_chips,
         actionButton("clear_filters_empty", "Clear all filters",
