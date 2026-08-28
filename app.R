@@ -23,7 +23,7 @@ default_settings <- setNames(rep("similar", length(all_dim_codes)), all_dim_code
 
 # Target-similarity values for the four-state toggle. Each is the raw_sim
 # value that scores 1.0 (anything else scores progressively less by linear
-# distance, clamped to >= 0). 0.5 isn't an option — use "similar" or
+# distance, clamped to >= 0). 0.5 isn't an option. Use "similar" or
 # "different" rather than something exactly in between.
 target_values <- c(
   similar          = 1.0,
@@ -46,7 +46,7 @@ people_dims <- c("people", "socioeconomic", "voting", "diversity")
 place_dims  <- setdiff(all_dim_codes, people_dims)
 
 # Dream-suburb mode: which dims belong to each of the three user-facing
-# themes. Different to the people/place split used elsewhere — employment
+# themes. Different to the people/place split used elsewhere. Employment
 # moves into "urban" here because the user-facing question is about urban
 # fabric/economy combined ("a busy place to work and live") rather than
 # household socioeconomics.
@@ -63,7 +63,7 @@ dream_theme_labels <- c(
   nature    = "Nature & climate",
   amenities = "Amenities")
 
-# Preset focus weights — (w_people, w_place) applied to the group means
+# Preset focus weights: (w_people, w_place) applied to the group means
 # when computing the match. Balanced = plain rowMeans across selected
 # dims (no group weighting), as before.
 focus_weights <- list(
@@ -159,7 +159,7 @@ r2_path <- function(...) {
 ref        <- read_parquet(r2_path("other/ref_suburb_sa4.parquet")) |>
   as_tibble() |>
   mutate(suburb_code_2021 = as.character(suburb_code_2021))
-# Shapefiles stay as local-repo reads — they're committed alongside the
+# Shapefiles stay as local-repo reads. They're committed alongside the
 # code in data/other/ since they're small and static. Only the larger,
 # more volatile parquet data lives on R2.
 shp_suburb <- readRDS("data/other/shp_suburb") |> st_transform(4326)
@@ -167,7 +167,7 @@ shp_state  <- readRDS("data/other/shp_state")  |> st_transform(4326)
 shp_gcc    <- readRDS("data/other/shp_gcc")    |> st_transform(4326)
 shp_sa4    <- readRDS("data/other/shp_sa4")    |> st_transform(4326)
 
-# Suburb centroids — used to build "Show on map" links that open
+# Suburb centroids, used to build "Show on map" links that open
 # OpenStreetMap in a new tab. Computed once at startup so the link can be
 # assembled inline without server reactivity.
 local({
@@ -223,7 +223,7 @@ gcc_lookup_full   <- setNames(ref$gcc_name_2021,   ref$suburb_code_2021)
 
 # ===== Explanatory data (suburb info panel + list comparison) =============
 # Pre-joined wide lookup of all 14 summary themes, keyed by
-# suburb_code_2021. Built once offline and saved as a single parquet file —
+# suburb_code_2021. Built once offline and saved as a single parquet file,
 # faster startup than fourteen separate qreads + full_joins, and ready for
 # direct read from object storage (R2 / S3) when the app is deployed there.
 suburb_info <- arrow::read_parquet(r2_path("explanatory/suburb_info.parquet")) |>
@@ -303,7 +303,7 @@ compute_dream_raw <- function(theme_refs) {
 # mostly_different / different (target values 1.0, 0.7, 0.3, 0.0).
 #
 # Per-dim score formulas:
-#   similar          : score = x       (identity — match is mean of raw)
+#   similar          : score = x       (identity, match is mean of raw)
 #   different        : score = 1 - x   (natural complement)
 #   mostly_similar   : score = max(0, 1 - 2 * |x - 0.7|)   (triangular peak)
 #   mostly_different : score = max(0, 1 - 2 * |x - 0.3|)   (triangular peak)
@@ -391,7 +391,7 @@ allowed_codes_from_tree <- function(selected_labels) {
 
 # Intersect the tree-filter codes with the cat_* picker selections.
 # Each `selected` argument is either NULL/empty (no filter on that dim) or a
-# character vector of category labels — suburbs matching any selected
+# character vector of category labels; suburbs matching any selected
 # category in that dim are kept.
 codes_from_cat_filters <- function(tree_codes, coast = NULL,
                                    terrain = NULL, remote = NULL) {
@@ -447,7 +447,7 @@ build_realestate_url <- function(suburb_name, state_abbr_value) {
 # Separates exact-match characteristics (>= 0.99) from informative top-3 so the
 # user isn't told that two suburbs are "most similar in terms of remoteness"
 # when remoteness happens to be a structural near-tie for thousands of
-# suburbs. Returns plain text — caller wraps in the appropriate HTML.
+# suburbs. Returns plain text; caller wraps in the appropriate HTML.
 format_why_sentence <- function(raw_vals) {
   vals <- unlist(raw_vals)
   if (length(vals) == 0) return("")
@@ -472,7 +472,7 @@ format_why_sentence <- function(raw_vals) {
   } else character(0)
 
   if (length(exact_idx) == 0) {
-    # No structural matches — original phrasing
+    # No structural matches: original phrasing
     if (length(top_parts) == 0) return("")
     sprintf("Most similar in terms of %s", join_and(top_parts))
   } else {
@@ -495,8 +495,8 @@ format_why_sentence <- function(raw_vals) {
 
 # Per-characteristic contribution bars (showing RAW similarity, not transformed)
 # plus the "set as reference" link. Rank info is local + national.
-# `winning_ref_label` is shown only when more than one reference is selected
-# — it identifies which reference produced this match. Pass NULL for
+# `winning_ref_label` is shown only when more than one reference is selected.
+# It identifies which reference produced this match. Pass NULL for
 # single-reference mode (no annotation rendered).
 build_popup <- function(name, abbr, match, rank, national_rank, national_pct,
                         raw_vals, code, winning_ref_label = NULL) {
@@ -512,7 +512,7 @@ build_popup <- function(name, abbr, match, rank, national_rank, national_pct,
     dim_labels[dims_ord], dim_colors[dims_ord], vals_ord * 100, scales::percent(vals_ord, accuracy = 1)),
     collapse = "")
 
-  # "Why this match" — separates structurally-similar dims (>=99%) from
+  # "Why this match": separates structurally-similar dims (>=99%) from
   # the informative top-3 so users don't see "most similar in terms of
   # remoteness" when remoteness is exact for many suburbs.
   why_text <- format_why_sentence(raw_vals)
@@ -758,7 +758,7 @@ ui <- function(request) fluidPage(
   .row-align { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 6px 0 14px; }
   .row-align > * { vertical-align: middle; }
 
-  /* virtualSelect picker — three things need fixing:
+  /* virtualSelect picker: three things need fixing:
      1. Kill the form-group's bottom margin so vertical centering works
      2. Force the visible button to 34px and lay it out as a flex row so
         its inner content (placeholder text and selected-suburb tags) is
@@ -788,7 +788,7 @@ ui <- function(request) fluidPage(
     margin-bottom: 1px;
   }
   
-  /* Regions and Filters dropdownButtons — match the 34px row height.
+  /* Regions and Filters dropdownButtons: match the 34px row height.
    These render as plain Bootstrap btn-default action-button dropdown-toggle. */
 .row-align .btn.dropdown-toggle,
 .row-align .btn.action-button {
@@ -835,8 +835,8 @@ ui <- function(request) fluidPage(
     overflow-y: auto;
   }
 
-  /* Settings-modal dim rows: switch + radios no longer fit one line —
-     let the radio group drop to its own line under the switch. */
+  /* Settings-modal dim rows: switch + radios no longer fit one line.
+     Let the radio group drop to its own line under the switch. */
   .dim-row { flex-wrap: wrap; }
   .dim-row > div:first-child { width: 100% !important; }
 
@@ -956,7 +956,7 @@ ui <- function(request) fluidPage(
   ),
 
   # Row 2: centred input controls + right-aligned Map/List toggle.
-  # Same 3-column flexbox trick — selectors sit in the true centre.
+  # Same 3-column flexbox trick: selectors sit in the true centre.
   fluidRow(
     column(width = 12,
       tags$div(
@@ -1075,7 +1075,7 @@ ui <- function(request) fluidPage(
   # when dream-suburb mode is active, sitting above the main view.
   uiOutput("dream_banner"),
 
-  # "What's this suburb like" overview — one bullet per active characteristic
+  # "What's this suburb like" overview: one bullet per active characteristic
   # describing how close the top matches are. Auto-hidden when no results.
   uiOutput("similarity_overview"),
 
@@ -1120,7 +1120,7 @@ server <- function(input, output, session) {
   # add a cache
   raw_cache <- new.env(parent = emptyenv())
   
-  # Active state — commits via Apply (modal) or picker/map-click (ref).
+  # Active state, commits via Apply (modal) or picker/map-click (ref).
   current_ref     <- reactiveVal(default_ref_code)
   settings_active <- reactiveVal(default_settings)
   focus_active    <- reactiveVal("balanced")   # preset focus weighting
@@ -1258,7 +1258,7 @@ server <- function(input, output, session) {
           .after = most_similar_suburb_code
         )
 
-      # Settings footer — written as commented lines so the CSV opens cleanly
+      # Settings footer: written as commented lines so the CSV opens cleanly
       # in Excel/R/Python and the provenance survives editing.
       setts <- settings_active()
       foc   <- focus_active()
@@ -1381,8 +1381,8 @@ server <- function(input, output, session) {
   # Categorical-filter pickers -> their reactiveVals.
   # When a filter becomes non-empty, also drop the corresponding characteristic
   # from settings_active so the match doesn't double-count it.
-  # (One-way: clearing the filter does NOT auto-restore the characteristic —
-  # the user can re-add it via the settings modal.)
+  # (One-way: clearing the filter does NOT auto-restore the characteristic.
+  # The user can re-add it via the settings modal.)
   apply_cat_filter <- function(picks, dim_code, filter_rv) {
     picks <- picks %||% character(0)
     filter_rv(picks)
@@ -1422,7 +1422,7 @@ server <- function(input, output, session) {
   # active categorical filters.
   output$region_summary <- renderText({
     sel <- region_filter()
-    # When nothing is restricted, hide the qualifier entirely — no need to
+    # When nothing is restricted, hide the qualifier entirely. No need to
     # tell the user "(all of Australia)" since that's the default.
     region_text <- if (length(sel) == 0) {
       ""
@@ -1467,7 +1467,7 @@ server <- function(input, output, session) {
   
   # Per-reference medians: a named list keyed by reference code, each holding
   # a named vector of per-dim medians for that reference's raw_score table.
-  # Used as the anchor for "Somewhat different" scoring — each reference has
+  # Used as the anchor for "Somewhat different" scoring. Each reference has
   # its own typical-similarity baseline.
   medians <- reactive({
     rs_list <- raw_scores()
@@ -1494,7 +1494,7 @@ server <- function(input, output, session) {
     # ----- Dream-suburb mode --------------------------------------------
     # The synthetic raw_wide already averages within themes, so we feed it
     # straight through compute_match like a single ref. No MAX/MEAN
-    # aggregation needed since there's effectively one "ref" — the blend.
+    # aggregation needed since there's effectively one "ref": the blend.
     if (!is.null(dream)) {
       raw_wide <- compute_dream_raw(dream$theme_refs)
       if (is.null(raw_wide) || nrow(raw_wide) == 0) return(NULL)
@@ -1668,7 +1668,7 @@ server <- function(input, output, session) {
         if (is_filtered) {
           tags$span(
             style = "font-size: 11px; color: #888; font-style: italic;",
-            "filtered above and disabled in match")
+            "filtered above, disabled in match")
         } else {
           conditionalPanel(
             condition = sprintf("input.dim_check_%s == true", d),
@@ -1875,7 +1875,7 @@ server <- function(input, output, session) {
       size = "l", easyClose = TRUE,
       tags$p(style = "font-size: 12px; color: #666;",
         "Pick one or more reference suburbs for each theme. Each theme can ",
-        "draw on different references, for example ", tags$em("people like Tecoma"),
+        "draw on different references, e.g. ", tags$em("people like Tecoma"),
         ", ", tags$em("urban feel like Hawthorn"), ", ",
         tags$em("nature like Sorrento"), ". The results are ranked by how ",
         "well each suburb matches the blend across all themes."),
@@ -2016,10 +2016,10 @@ server <- function(input, output, session) {
           "vegetation (cover types from Digital Earth Australia), ",
           "water (rivers, lakes, hydrology), weather (temperature, rainfall ",
           "grids), landcover (mesh-block land use composition), and nine ",
-          "amenity-access characteristics (public transport, health ",
+          "amenity-access characteristics: public transport, health ",
           "infrastructure, tertiary education, community infrastructure, ",
-          "cultural amenities, fresh food, dining, schools, and kinder), ",
-          "each measured by average distance to and count of nearby ",
+          "cultural amenities, fresh food, dining, schools, and kinder. ",
+          "Each is measured by average distance to and count of nearby ",
           "facilities (from OpenStreetMap).")),
       tags$h5("How the match is calculated"),
       tags$p("Each characteristic's raw similarity is transformed by your chosen ",
@@ -2034,8 +2034,8 @@ server <- function(input, output, session) {
       tags$p("The transformed characteristic scores are then aggregated:"),
       tags$ul(
         tags$li(tags$b("Balanced"), ": simple mean across all selected characteristics."),
-        tags$li(tags$b("People-focused"), ": people-group mean * 0.75 + place-group mean * 0.25."),
-        tags$li(tags$b("Place-focused"), ": opposite weighting (place * 0.75, people * 0.25).")
+        tags$li(tags$b("People-focused"), ": people-group mean × 0.75 + place-group mean × 0.25."),
+        tags$li(tags$b("Place-focused"), ": opposite weighting (place × 0.75, people × 0.25).")
       ),
       tags$h5("Multiple reference suburbs"),
       tags$p("When more than one reference is selected: ",
@@ -2054,9 +2054,20 @@ server <- function(input, output, session) {
 
 
   # --- Map base ----------------------------------------------------------
+  # CARTO basemaps now require an API key (previously free/anonymous via
+  # addProviderTiles). Key is read from the CARTO_API_KEY env var. Set it
+  # in .Renviron locally, and as a secret/env var in the deployment
+  # environment (e.g. Posit Connect Cloud). Never hardcode it here.
   output$map <- renderLeaflet({
     leaflet() |>
-      addProviderTiles(providers$CartoDB.Positron) |>
+      addTiles(
+        urlTemplate = paste0(
+          "https://{s}.basemaps.cartocdn.com/rastertiles/light_all/{z}/{x}/{y}.png",
+          "?key=", Sys.getenv("CARTO_API_KEY")),
+        attribution = paste0(
+          '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>, ',
+          '&copy; <a href="https://carto.com/attributions">CARTO</a>'),
+        options = tileOptions(subdomains = "abcd", maxZoom = 20)) |>
       setView(lng = 134, lat = -28, zoom = 4)
   })
 
@@ -2241,10 +2252,10 @@ server <- function(input, output, session) {
 
   # --- "What's this suburb like" overview --------------------------------
   # Two-part summary:
-  #   1. Header sentence — names the suburbs that dominate the strongest
+  #   1. Header sentence: names the suburbs that dominate the strongest
   #      bucket across characteristics (the suburbs that show up most often
   #      among the closest matches).
-  #   2. "Where things differ" — characteristics where the best bucket reached
+  #   2. "Where things differ": characteristics where the best bucket reached
   #      is weaker than the strongest, with the closest suburbs there.
   # Goal: surface the dominant story in one line, then call out outliers.
   output$similarity_overview <- renderUI({
@@ -2256,7 +2267,7 @@ server <- function(input, output, session) {
     raw_cols <- grep("^raw_", names(cd), value = TRUE)
     # Structural characteristics that score near-perfectly between any two
     # nearby suburbs (all metro Melbourne suburbs share the same coast /
-    # remoteness / weather profile) — they'd dominate the "almost
+    # remoteness / weather profile), they'd dominate the "almost
     # identical" header without telling the user anything informative.
     # Excluded from the overview only; still in the underlying match.
     raw_cols <- setdiff(raw_cols,
@@ -2439,7 +2450,7 @@ server <- function(input, output, session) {
       left_join(ref |> select(suburb_code_2021, gcc_name_2021),
                 by = c("suburb_b" = "suburb_code_2021"))
     if (!"gcc_name_2021" %in% names(joined)) return(NULL)
-    # Coerce defensively — if a prior reactive ever ends up storing this
+    # Coerce defensively. If a prior reactive ever ends up storing this
     # column as a list (seen intermittently after rapid filter changes),
     # count() would blow up. Flattening to character is safe either way.
     gcc <- as.character(unlist(joined$gcc_name_2021))
@@ -2464,7 +2475,7 @@ server <- function(input, output, session) {
   })
 
   # --- Bottom-left: top-10 horizontal bar chart of match scores.
-  # Each row is one suburb_b — bar width = match %. Hovering a row
+  # Each row is one suburb_b, bar width = match %. Hovering a row
   # reveals an absolutely-positioned tooltip showing the per-dim raw
   # similarity bars + winning-ref label (when multi-ref).
   output$top10 <- renderUI({
@@ -2567,7 +2578,7 @@ server <- function(input, output, session) {
       .top10-row.tt-open .top10-tooltip { display: block !important; }
       @media (max-width: 768px) {
         /* On narrow screens the tooltip's left:100% positioning would run
-           off-screen — anchor it below the row instead, full width. */
+           off-screen. Anchor it below the row instead, full width. */
         .top10-tooltip {
           position: static !important;
           margin: 4px 0 8px 0 !important;
@@ -2578,7 +2589,7 @@ server <- function(input, output, session) {
     "))
     tap_js <- tags$script(HTML("
       // Hover doesn't fire on touch devices, so give top-10 rows a tap
-      // toggle as a fallback — tapping a row shows/hides its breakdown,
+      // toggle as a fallback. Tapping a row shows/hides its breakdown,
       // tapping it again (or another row) closes it.
       $(document).off('click.top10tap').on('click.top10tap', '.top10-row', function(e) {
         var wasOpen = $(this).hasClass('tt-open');
@@ -2685,7 +2696,7 @@ server <- function(input, output, session) {
                  if (length(active_filters) > 0) {
                    "Your category filters are excluding every suburb. Try removing one or widening the region selection."
                  } else {
-                   "Try widening your region selection."
+                   "Try widening your region selection. The current region tree has no allowed suburbs."
                  }),
         active_chips,
         actionButton("clear_filters_empty", "Clear all filters",
@@ -2767,13 +2778,13 @@ server <- function(input, output, session) {
                    "→ realestate.com.au")
           )
         ),
-        # "Why this match" — top 3 informative characteristics (with structural
+        # "Why this match": top 3 informative characteristics (with structural
         # ~100% matches called out separately so they don't dominate)
         tags$div(style = "font-size: 12px; color: #555; margin: 2px 0 8px 0;
                           font-style: italic;",
           format_why_sentence(raw_vals)
         ),
-        # Comparison strip — match's headline archetypes, ticked when they
+        # Comparison strip: match's headline archetypes, ticked when they
         # equal the reference suburb's (data: suburb_info summaries)
         build_comparison_strip(ref_info_row, get_info(code)),
         # Body: scoring chart (left) + inline info (right). The mini-map has
@@ -2815,7 +2826,7 @@ server <- function(input, output, session) {
   # When nothing has been clicked yet, the panel defaults to showing the
   # current reference suburb so the panel is never empty.
 
-  # Popup tracking — the next click on the basemap (not on a top-N polygon)
+  # Popup tracking: the next click on the basemap (not on a top-N polygon)
   # closes the popup rather than opening a new one. The "X" close button
   # on Leaflet's popup is wired via JS below so the state stays in sync if
   # the user closes manually.
@@ -2886,12 +2897,12 @@ server <- function(input, output, session) {
     cl <- input$map_click; req(cl$lng, cl$lat)
 
     # If the user just clicked a top-N polygon, map_click fires alongside
-    # map_shape_click — let the polygon's own popup show, don't double up.
+    # map_shape_click. Let the polygon's own popup show, don't double up.
     if (as.numeric(Sys.time()) - last_shape_clk() < 0.2) return()
 
     # If a popup is already open and this click is on the basemap rather
     # than another mapped polygon, just close it. The next click can then
-    # open something new — standard "click outside to dismiss" expectation.
+    # open something new: standard "click outside to dismiss" expectation.
     if (popup_open()) {
       leafletProxy("map") |> clearGroup("clickpop") |> clearPopups()
       popup_open(FALSE)
