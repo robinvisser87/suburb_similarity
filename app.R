@@ -1975,7 +1975,7 @@ server <- function(input, output, session) {
     leaflet() |>
       addTiles(
         urlTemplate = paste0(
-          "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png",
+          "https://{s}.basemaps.cartocdn.com/rastertiles/light_all/{z}/{x}/{y}.png",
           "?key=", Sys.getenv("CARTO_API_KEY")),
         attribution = paste0(
           '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>, ',
