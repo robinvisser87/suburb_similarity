@@ -1627,11 +1627,17 @@ server <- function(input, output, session) {
       if (length(cat_remote_filter())  > 0) "remoteness" else NULL
     )
 
-    # Sort: all place dims first (alphabetised), then all people dims.
-    # One group header chip at the top of each section.
-    place_ordered  <- intersect(sort(place_dims),  all_dim_codes)
-    people_ordered <- intersect(sort(people_dims), all_dim_codes)
-    ordered_dims   <- c(place_ordered, people_ordered)
+    # Group into the same 4 themes used in the dream-suburb modal, so the
+    # two surfaces stay conceptually consistent. Within each theme, dims
+    # are alphabetised.
+    theme_group_colours <- c(
+      people    = "#1C8356",
+      urban     = "#5A5156",
+      nature    = "#325A9B",
+      amenities = "#B10DA1"
+    )
+    theme_ordered <- lapply(dream_theme_dims, function(dims)
+      intersect(sort(dims), all_dim_codes))
 
     group_header <- function(label, colour) {
       tags$div(
@@ -1639,7 +1645,7 @@ server <- function(input, output, session) {
           "font-size:11px; font-weight:600; letter-spacing:0.5px;
            color:white; background:%s; display:inline-block;
            padding:2px 10px; border-radius:10px;
-           margin: 4px 0 4px 0;", colour),
+           margin: 10px 0 4px 0;", colour),
         toupper(label))
     }
 
@@ -1678,12 +1684,13 @@ server <- function(input, output, session) {
         })
     }
 
-    place_block <- tagList(
-      group_header("place",  "#5A5156"),
-      lapply(place_ordered,  build_row))
-    people_block <- tagList(
-      group_header("people", "#1C8356"),
-      lapply(people_ordered, build_row))
+    theme_blocks <- tagList(
+      lapply(names(dream_theme_dims), function(theme_id) {
+        tagList(
+          group_header(dream_theme_labels[[theme_id]],
+                       theme_group_colours[[theme_id]]),
+          lapply(theme_ordered[[theme_id]], build_row))
+      }))
 
     modalDialog(
       title = "Match settings", easyClose = FALSE, size = "xl",
@@ -1707,13 +1714,13 @@ server <- function(input, output, session) {
         tags$div(style = "font-size: 11px; color: #666; margin-left: 24px;",
           "Adjust how much weight is given to people vs place characteristics. ",
           "People characteristics: age, sex, family composition, socioeconomic, voting, diversity. ",
-          "Place characteristics: everything else.")),
+          "Place characteristics: everything else (urban fabric, nature/climate, and local amenities).")),
       tags$hr(style = "margin: 8px 0;"),
       tags$label("characteristics and how to score them:"),
       div(style = "font-size: 11px; color: #666; margin-bottom: 4px;",
           "Similar = match the reference closely. Mostly similar = somewhat closer than average. ",
           "Mostly different = somewhat further. Different = match as little as possible."),
-      div(style = "margin-top: 6px;", place_block, people_block),
+      div(style = "margin-top: 6px;", theme_blocks),
       footer = tagList(
         actionButton("reset_settings", "Reset"),
         actionButton("apply_settings", "Apply", class = "btn-primary"),
