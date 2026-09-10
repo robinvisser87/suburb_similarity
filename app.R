@@ -40,14 +40,11 @@ target_labels <- c(
   different        = "Contrasting"
 )
 
-# People vs Place grouping for the focus presets. 4 people-ish dims (people,
-# socioeconomic, voting, diversity) and 10 place-ish dims (the rest).
-people_dims <- c("people", "socioeconomic", "voting", "diversity")
-place_dims  <- setdiff(all_dim_codes, people_dims)
-
-# Dream-suburb mode: which dims belong to each of the three user-facing
-# themes. Different to the people/place split used elsewhere. Employment
-# moves into "urban" here because the user-facing question is about urban
+# Dream-suburb mode: which dims belong to each of the four user-facing
+# themes. This is also now the grouping used for match scoring itself
+# (see compute_match): the overall match is the average of whichever of
+# these four themes have at least one selected indicator. Employment
+# sits in "urban" because the user-facing question is about urban
 # fabric/economy combined ("a busy place to work and live") rather than
 # household socioeconomics.
 dream_theme_dims <- list(
@@ -63,20 +60,12 @@ dream_theme_labels <- c(
   nature    = "Nature & climate",
   amenities = "Amenities")
 
-# Preset focus weights: (w_people, w_place) applied to the group means
-# when computing the match. Balanced = plain rowMeans across selected
-# dims (no group weighting), as before.
-focus_weights <- list(
-  balanced       = NULL,            # signal: use plain rowMeans
-  people_focused = c(people = 0.75, place = 0.25),
-  place_focused  = c(people = 0.25, place = 0.75)
-)
-
-focus_labels <- c(
-  balanced       = "Balanced",
-  people_focused = "People-focused",
-  place_focused  = "Place-focused"
-)
+# Similarity is now always the average of each active theme's own mean
+# (people / urban / nature / amenities, per dream_theme_dims above), not a
+# flat mean of every individual indicator. A theme with zero selected
+# indicators is skipped entirely rather than pulling the score toward 0.
+# There is no more people/place "Focus" preset. All active themes are
+# weighted equally.
 
 dim_labels <- c(
   coast = "Coast access",                  
@@ -309,11 +298,13 @@ compute_dream_raw <- function(theme_refs) {
 #   mostly_different : score = max(0, 1 - 2 * |x - 0.3|)   (triangular peak)
 # All scores are clamped to [0, 1] defensively.
 #
-# `focus` is one of: "balanced" (rowMeans across selected dims), or
-# "people_focused" / "place_focused" (weighted mean of group means). The
-# medians argument is retained for back-compat but no longer used.
-compute_match <- function(raw_wide, settings, medians = NULL,
-                              focus = "balanced") {
+# Aggregation: the match is the mean of each active theme's own mean
+# (people / urban / nature / amenities, per dream_theme_dims), not a flat
+# mean across every selected indicator. A theme with none of its
+# indicators selected is skipped entirely and does not pull the score
+# down; the match is simply the average of whichever themes have at
+# least one active indicator. All active themes are weighted equally.
+compute_match <- function(raw_wide, settings, medians = NULL) {
   selected <- names(settings)
   if (length(selected) == 0) return(NULL)
 
@@ -337,40 +328,21 @@ compute_match <- function(raw_wide, settings, medians = NULL,
   score_cols <- score_cols[score_cols %in% names(scored)]
   if (length(score_cols) == 0) return(NULL)
 
-  if (is.null(focus) || focus == "balanced" || !focus %in% names(focus_weights) ||
-      is.null(focus_weights[[focus]])) {
-    # Plain mean across all selected dims (unchanged behaviour).
-    scored$match <- rowMeans(
-      as.matrix(as.data.frame(scored)[, score_cols, drop = FALSE]),
-      na.rm = TRUE)
-  } else {
-    # Group-weighted: split selected dims into people / place groups,
-    # take each group's mean, then weight by the preset.
-    selected_people <- intersect(selected, people_dims)
-    selected_place  <- intersect(selected, place_dims)
-    p_cols <- paste0("score_", selected_people)
-    q_cols <- paste0("score_", selected_place)
-    p_cols <- p_cols[p_cols %in% names(scored)]
-    q_cols <- q_cols[q_cols %in% names(scored)]
+  score_df <- as.data.frame(scored)
 
-    score_df <- as.data.frame(scored)
-    people_mean <- if (length(p_cols)) {
-      rowMeans(as.matrix(score_df[, p_cols, drop = FALSE]), na.rm = TRUE)
-    } else NA_real_
-    place_mean <- if (length(q_cols)) {
-      rowMeans(as.matrix(score_df[, q_cols, drop = FALSE]), na.rm = TRUE)
-    } else NA_real_
+  # One mean per theme, using only that theme's selected+scored dims.
+  # Themes with zero selected dims contribute NA and are dropped from
+  # the final average below (rowMeans(..., na.rm = TRUE) over the
+  # theme-means matrix).
+  theme_means <- lapply(dream_theme_dims, function(dims) {
+    cols <- paste0("score_", intersect(selected, dims))
+    cols <- cols[cols %in% names(score_df)]
+    if (length(cols) == 0) return(rep(NA_real_, nrow(score_df)))
+    rowMeans(as.matrix(score_df[, cols, drop = FALSE]), na.rm = TRUE)
+  })
+  theme_mean_mat <- do.call(cbind, theme_means)
 
-    w <- focus_weights[[focus]]
-    # If only one group has any selected dims, fall back to that group's mean
-    if (length(p_cols) == 0) {
-      scored$match <- place_mean
-    } else if (length(q_cols) == 0) {
-      scored$match <- people_mean
-    } else {
-      scored$match <- w[["people"]] * people_mean + w[["place"]] * place_mean
-    }
-  }
+  scored$match <- rowMeans(theme_mean_mat, na.rm = TRUE)
 
   scored |> filter(!is.nan(match))
 }
@@ -1136,7 +1108,6 @@ server <- function(input, output, session) {
   # Active state, commits via Apply (modal) or picker/map-click (ref).
   current_ref     <- reactiveVal(default_ref_code)
   settings_active <- reactiveVal(default_settings)
-  focus_active    <- reactiveVal("balanced")   # preset focus weighting
   top_n_active    <- reactiveVal(50)
   region_filter   <- reactiveVal(default_tree_selection)
 
@@ -1270,7 +1241,6 @@ server <- function(input, output, session) {
       # Settings footer: written as commented lines so the CSV opens cleanly
       # in Excel/R/Python and the provenance survives editing.
       setts <- settings_active()
-      foc   <- focus_active()
       mode  <- input$multi_mode %||% "max"
 
       settings_lines <- c(
@@ -1279,7 +1249,6 @@ server <- function(input, output, session) {
         sprintf("# Reference suburb(s): %s",
                 paste(vapply(ref_codes, label, character(1)), collapse = "; ")),
         sprintf("# Top N requested: %d", n_top),
-        sprintf("# Focus preset: %s", focus_labels[[foc]] %||% foc),
         if (length(ref_codes) > 1)
           sprintf("# Multi-reference aggregation: %s",
                   if (mode == "max") "match any (best fit)"
@@ -1320,7 +1289,6 @@ server <- function(input, output, session) {
   onBookmark(function(state) {
     state$values$current_ref        <- current_ref()
     state$values$settings_active    <- settings_active()
-    state$values$focus_active       <- focus_active()
     state$values$top_n_active       <- top_n_active()
     state$values$region_filter      <- region_filter()
     state$values$cat_coast_filter   <- cat_coast_filter()
@@ -1333,8 +1301,6 @@ server <- function(input, output, session) {
       current_ref(state$values$current_ref)
     if (!is.null(state$values$settings_active))
       settings_active(state$values$settings_active)
-    if (!is.null(state$values$focus_active))
-      focus_active(state$values$focus_active)
     if (!is.null(state$values$top_n_active))
       top_n_active(state$values$top_n_active)
     if (!is.null(state$values$region_filter))
@@ -1492,7 +1458,6 @@ server <- function(input, output, session) {
   match_df <- reactive({
     dream <- dream_refs_active()
     setts <- settings_active()
-    focus <- focus_active()
 
     # ----- Dream-suburb mode --------------------------------------------
     # The synthetic raw_wide already averages within themes, so we feed it
@@ -1502,7 +1467,7 @@ server <- function(input, output, session) {
       raw_wide <- compute_dream_raw(dream$theme_refs)
       if (is.null(raw_wide) || nrow(raw_wide) == 0) return(NULL)
 
-      df <- compute_match(raw_wide, setts, NULL, focus = focus)
+      df <- compute_match(raw_wide, setts, NULL)
       if (is.null(df) || nrow(df) == 0) return(NULL)
       df$winning_ref <- "dream"
 
@@ -1550,7 +1515,7 @@ server <- function(input, output, session) {
     # Per-reference match tables
     per_ref <- imap(rs_list, function(rs, ref_code) {
       meds <- med_list[[ref_code]]
-      df   <- compute_match(rs, setts, meds, focus = focus)
+      df   <- compute_match(rs, setts, meds)
       if (is.null(df) || nrow(df) == 0) return(NULL)
       df |> mutate(winning_ref = ref_code, .before = 1)
     })
@@ -1619,7 +1584,6 @@ server <- function(input, output, session) {
   # --- Similarity settings modal ----------------------------------------
   settings_modal <- function() {
     setts <- settings_active()
-    cur_focus <- focus_active()
     # Which dims are currently being filtered above via cat_* pickers?
     filtered_dims <- c(
       if (length(cat_coast_filter())   > 0) "coast"      else NULL,
@@ -1704,17 +1668,11 @@ server <- function(input, output, session) {
          .dim-row label { font-size: 12.5px; white-space: nowrap; }
         "
       )),
-      tags$label("Focus:"),
-      div(style = "margin-top: 4px; margin-bottom: 12px;",
-        radioButtons("focus_choice", NULL,
-                     choices  = c("Balanced (all characteristics equal)" = "balanced",
-                                  "People-first (people group 75%)" = "people_focused",
-                                  "Place-first (place group 75%)"  = "place_focused"),
-                     selected = cur_focus, inline = FALSE),
-        tags$div(style = "font-size: 11px; color: #666; margin-left: 24px;",
-          "Adjust how much weight is given to people vs place characteristics. ",
-          "People characteristics: age, sex, family composition, socioeconomic, voting, diversity. ",
-          "Place characteristics: everything else (urban fabric, nature/climate, and local amenities).")),
+      tags$div(style = "font-size: 11px; color: #666; margin-bottom: 12px;",
+        "Your match score is the average of each theme below that has at ",
+        "least one characteristic switched on. A theme left entirely off ",
+        "doesn't count against you, it's simply left out of the average, ",
+        "not treated as 0."),
       tags$hr(style = "margin: 8px 0;"),
       tags$label("characteristics and how to score them:"),
       div(style = "font-size: 11px; color: #666; margin-bottom: 4px;",
@@ -1741,7 +1699,6 @@ server <- function(input, output, session) {
         cur_target)
       updateRadioButtons(session, paste0("dim_target_", d), selected = cur_target)
     }
-    updateRadioButtons(session, "focus_choice", selected = focus_active())
   })
 
   observeEvent(input$apply_settings, {
@@ -1752,7 +1709,6 @@ server <- function(input, output, session) {
       }
     }
     settings_active(new_settings)
-    focus_active(input$focus_choice %||% "balanced")
     removeModal()
   })
 
@@ -1761,15 +1717,13 @@ server <- function(input, output, session) {
       updateMaterialSwitch(session, paste0("dim_check_", d), value = TRUE)
       updateRadioButtons(session, paste0("dim_target_", d), selected = "similar")
     }
-    updateRadioButtons(session, "focus_choice", selected = "balanced")
   })
 
   # The Similarity Settings button doubles as a live summary of active
   # settings: a chip per target bucket (only buckets with at least one dim
-  # are shown), plus a focus chip. Clicking opens the settings modal.
+  # are shown). Clicking opens the settings modal.
   output$settings_btn <- renderUI({
     setts <- settings_active()
-    foc   <- focus_active()
     n_active <- length(setts)
 
     # Count dims per target (treat missing/unknown as "similar")
@@ -1805,13 +1759,7 @@ server <- function(input, output, session) {
     })
     chips <- Filter(Negate(is.null), chips)
 
-    focus_chip <- tags$span(
-      style = "background:rgba(255,255,255,0.25); color:white;
-               padding:1px 6px; border-radius:8px; font-weight:500;
-               font-size:10px; white-space:nowrap;",
-      focus_labels[[foc]] %||% foc)
-
-    all_chips <- c(chips, list(focus_chip))
+    all_chips <- chips
     n <- length(all_chips)
 
     # Row layout rule:
@@ -1876,11 +1824,13 @@ server <- function(input, output, session) {
       title = tagList(icon("wand-magic-sparkles"), " Build your dream suburb"),
       size = "l", easyClose = TRUE,
       tags$p(style = "font-size: 12px; color: #666;",
-        "Pick one or more reference suburbs for each theme. Each theme can ",
-        "draw on different references, e.g. ", tags$em("people like Tecoma"),
+        "Pick one or more reference suburbs for any theme(s) below for ",
+        "your themes of choice. You can leave themes empty too if you ",
+        "don't want them included. Each theme can draw on different ",
+        "references, e.g. ", tags$em("people like Tecoma"),
         ", ", tags$em("urban feel like Hawthorn"), ", ",
         tags$em("nature like Sorrento"), ". The results are ranked by how ",
-        "well each suburb matches the blend across all themes."),
+        "well each suburb matches the blend."),
       theme_picker("people", "People & culture",
                    "voting, people, diversity, socioeconomic",
                    pre$people),
