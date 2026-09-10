@@ -1110,6 +1110,10 @@ server <- function(input, output, session) {
   settings_active <- reactiveVal(default_settings)
   top_n_active    <- reactiveVal(50)
   region_filter   <- reactiveVal(default_tree_selection)
+  # Server-side source of truth for the "Zoom to" mode, kept in sync with
+  # the map_zoom dropdown but read directly (no UI round-trip) so the
+  # auto-fit check below can never race against a stale/unset input$map_zoom.
+  zoom_mode       <- reactiveVal("auto")
 
   # Suburb whose facts are shown in the info panel (NULL = panel hidden)
   clicked_suburb  <- reactiveVal(NULL)
@@ -1339,6 +1343,12 @@ server <- function(input, output, session) {
     codes <- codes[!is.na(codes) & nzchar(codes)]
     if (length(codes) > 0 && !identical(sort(codes), sort(current_ref()))) {
       current_ref(codes)
+      # A genuinely new reference area should always auto-pan to its new
+      # top-N, even if the user had previously zoomed to a specific state
+      # for a different search. Reset server-side state immediately (no
+      # round-trip lag) and mirror it in the dropdown for the UI to match.
+      zoom_mode("auto")
+      updateSelectInput(session, "map_zoom", selected = "auto")
     }
   }, ignoreInit = TRUE, ignoreNULL = FALSE)
 
@@ -2029,12 +2039,13 @@ server <- function(input, output, session) {
       choices  = c("Auto (fit results)" = "auto",
                    "Australia"          = "australia",
                    setNames(states, states)),
-      selected = isolate(input$map_zoom) %||% "auto")
+      selected = isolate(zoom_mode()))
   })
 
   observeEvent(input$map_zoom, {
     #req(input$map_bounds)
     z <- input$map_zoom %||% "auto"
+    zoom_mode(z)   # keep the server-side source of truth in sync
     if (z == "auto") {
       d <- map_data()
       if (!is.null(d) && nrow(d) > 0) {
@@ -2133,9 +2144,14 @@ server <- function(input, output, session) {
     # Rank-based Blues palette: rank 1 = darkest blue, rank N = lightest.
     # Visually emphasises rank position, which scales cleanly even when
     # match scores cluster in a narrow numeric range.
+    # Custom ramp rather than RColorBrewer's stock "Blues": the stock
+    # palette fades to near-white at the light end, which is nearly
+    # invisible against the light-grey Esri basemap for the lowest-ranked
+    # matches. Flooring the light end at a still-clearly-blue shade keeps
+    # every rank visible while preserving the dark-to-light rank gradient.
     n_results <- nrow(shp_sub)
     pal_fn <- colorNumeric(
-      palette = "Blues",
+      palette = colorRampPalette(c("#08306B", "#6BAED6"))(100),
       domain  = c(1, max(n_results, 2)),
       reverse = TRUE      # invert so rank 1 (smallest int) -> darkest blue
     )
@@ -2151,7 +2167,7 @@ server <- function(input, output, session) {
       addPolygons(
         data = shp_sub, group = "matches", layerId = ~suburb_code_2021,
         fillColor = ~pal_fn(rank), fillOpacity = 0.65,
-        color = "white", weight = 2,
+        color = "#4d4d4d", weight = 2,
         label = ~lapply(
           sprintf("%s: rank %d (match %.1f%%)<br><i>Click for more info</i>",
                   suburb_name_2021, rank, match * 100),
@@ -2176,7 +2192,7 @@ server <- function(input, output, session) {
     # if zoom is in Auto mode, fit to the GCCSA holding the most matches
     # (single dominant cluster usually tells the most useful story).
     # Falls back to the full top-N bbox if no GCC info is available.
-    if ((isolate(input$map_zoom) %||% "auto") == "auto" && nrow(shp_sub) > 0) {
+    if (isolate(zoom_mode()) == "auto" && nrow(shp_sub) > 0) {
       top_gcc <- shp_sub$suburb_code_2021 |>
         (\(codes) gcc_lookup_full[codes])() |>
         unname() |>
