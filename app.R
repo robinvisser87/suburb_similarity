@@ -1613,14 +1613,18 @@ server <- function(input, output, session) {
     theme_ordered <- lapply(dream_theme_dims, function(dims)
       intersect(sort(dims), all_dim_codes))
 
-    group_header <- function(label, colour) {
+    group_header <- function(theme_id, label, colour, all_on) {
       tags$div(
-        style = sprintf(
-          "font-size:11px; font-weight:600; letter-spacing:0.5px;
-           color:white; background:%s; display:inline-block;
-           padding:2px 10px; border-radius:10px;
-           margin: 10px 0 4px 0;", colour),
-        toupper(label))
+        style = "display:flex; align-items:center; gap:8px;
+                 margin: 10px 0 4px 0;",
+        tags$div(
+          style = sprintf(
+            "font-size:11px; font-weight:600; letter-spacing:0.5px;
+             color:white; background:%s; display:inline-block;
+             padding:2px 10px; border-radius:10px;", colour),
+          toupper(label)),
+        materialSwitch(paste0("theme_check_", theme_id), label = NULL,
+                       value = all_on, status = "primary", inline = TRUE))
     }
 
     build_row <- function(d) {
@@ -1660,10 +1664,13 @@ server <- function(input, output, session) {
 
     theme_blocks <- tagList(
       lapply(names(dream_theme_dims), function(theme_id) {
+        dims_in_theme <- theme_ordered[[theme_id]]
+        all_on <- length(dims_in_theme) > 0 &&
+          all(dims_in_theme %in% names(setts))
         tagList(
-          group_header(dream_theme_labels[[theme_id]],
-                       theme_group_colours[[theme_id]]),
-          lapply(theme_ordered[[theme_id]], build_row))
+          group_header(theme_id, dream_theme_labels[[theme_id]],
+                       theme_group_colours[[theme_id]], all_on),
+          lapply(dims_in_theme, build_row))
       }))
 
     modalDialog(
@@ -1727,6 +1734,22 @@ server <- function(input, output, session) {
       updateMaterialSwitch(session, paste0("dim_check_", d), value = TRUE)
       updateRadioButtons(session, paste0("dim_target_", d), selected = "similar")
     }
+    for (theme_id in names(dream_theme_dims)) {
+      updateMaterialSwitch(session, paste0("theme_check_", theme_id), value = TRUE)
+    }
+  })
+
+  # Theme-level "select all" switches: flipping one turns every indicator
+  # switch within that theme on/off in one click. Registered once here
+  # (not inside settings_modal(), which is rebuilt every time the modal
+  # opens, to avoid stacking duplicate observers on repeated opens).
+  lapply(names(dream_theme_dims), function(theme_id) {
+    observeEvent(input[[paste0("theme_check_", theme_id)]], {
+      val <- isTRUE(input[[paste0("theme_check_", theme_id)]])
+      for (d in intersect(dream_theme_dims[[theme_id]], all_dim_codes)) {
+        updateMaterialSwitch(session, paste0("dim_check_", d), value = val)
+      }
+    }, ignoreInit = TRUE)
   })
 
   # The Similarity Settings button doubles as a live summary of active
@@ -2151,9 +2174,12 @@ server <- function(input, output, session) {
     # every rank visible while preserving the dark-to-light rank gradient.
     n_results <- nrow(shp_sub)
     pal_fn <- colorNumeric(
+      # Ramp is already ordered dark ("#08306B") -> light ("#6BAED6"),
+      # matching domain c(1, n) directly: rank 1 -> dark, rank n -> light.
+      # No reverse needed here (unlike RColorBrewer named palettes, which
+      # are ordered light-to-dark internally and would need reverse=TRUE).
       palette = colorRampPalette(c("#08306B", "#6BAED6"))(100),
-      domain  = c(1, max(n_results, 2)),
-      reverse = TRUE      # invert so rank 1 (smallest int) -> darkest blue
+      domain  = c(1, max(n_results, 2))
     )
 
     # Legend ticks: 1, ~N/4, ~N/2, ~3N/4, N (or just 1..N for small N)
