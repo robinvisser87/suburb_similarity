@@ -1665,8 +1665,14 @@ server <- function(input, output, session) {
     theme_blocks <- tagList(
       lapply(names(dream_theme_dims), function(theme_id) {
         dims_in_theme <- theme_ordered[[theme_id]]
-        all_on <- length(dims_in_theme) > 0 &&
-          all(dims_in_theme %in% names(setts))
+        # A filtered dim (via the category-filter pickers) is deliberately
+        # excluded from the match already, so it shouldn't count against
+        # "is this theme fully on" - a single filtered indicator would
+        # otherwise flip the whole theme's switch to "off" even though
+        # every other indicator in it is still active.
+        checkable_dims <- setdiff(dims_in_theme, filtered_dims)
+        all_on <- length(checkable_dims) > 0 &&
+          all(checkable_dims %in% names(setts))
         tagList(
           group_header(theme_id, dream_theme_labels[[theme_id]],
                        theme_group_colours[[theme_id]], all_on),
@@ -1746,7 +1752,18 @@ server <- function(input, output, session) {
   lapply(names(dream_theme_dims), function(theme_id) {
     observeEvent(input[[paste0("theme_check_", theme_id)]], {
       val <- isTRUE(input[[paste0("theme_check_", theme_id)]])
-      for (d in intersect(dream_theme_dims[[theme_id]], all_dim_codes)) {
+      # A dim currently excluded by a category filter (coast/terrain/
+      # remoteness) stays untouched by the bulk toggle - filters are a
+      # deliberate, one-way exclusion (see apply_cat_filter above), and a
+      # theme-level "turn everything on" shouldn't silently override that.
+      filtered_now <- c(
+        if (length(cat_coast_filter())   > 0) "coast"      else NULL,
+        if (length(cat_terrain_filter()) > 0) "terrain"    else NULL,
+        if (length(cat_remote_filter())  > 0) "remoteness" else NULL
+      )
+      dims <- setdiff(intersect(dream_theme_dims[[theme_id]], all_dim_codes),
+                      filtered_now)
+      for (d in dims) {
         updateMaterialSwitch(session, paste0("dim_check_", d), value = val)
       }
     }, ignoreInit = TRUE)
@@ -2121,6 +2138,11 @@ server <- function(input, output, session) {
     raw_cols   <- grep("^raw_",   names(d), value = TRUE)
     join_cols  <- c("suburb_b", "match", "rank", "national_rank",
                     "national_pct", "winning_ref", raw_cols)
+    # Popup breakdown charts should only show dims currently switched on
+    # in Match Settings, not every dim the underlying data happens to
+    # carry (which includes ones the user has turned off).
+    active_dims     <- names(settings_active())
+    active_raw_cols <- raw_cols[sub("^raw_", "", raw_cols) %in% active_dims]
 
     shp_sub <- shp_suburb |>
       inner_join(d |> select(all_of(join_cols)),
@@ -2150,7 +2172,7 @@ server <- function(input, output, session) {
     } else NULL
 
     shp_sub$popup_html <- vapply(seq_len(nrow(shp_sub)), function(i) {
-      raw_vals <- as.list(as.data.frame(st_drop_geometry(shp_sub))[i, raw_cols, drop = FALSE])
+      raw_vals <- as.list(as.data.frame(st_drop_geometry(shp_sub))[i, active_raw_cols, drop = FALSE])
       names(raw_vals) <- sub("^raw_", "", names(raw_vals))
       winning_lbl <- if (multi_ref) {
         ref_name_lookup[[ shp_sub$winning_ref[i] ]]
@@ -2474,22 +2496,8 @@ server <- function(input, output, session) {
   output$top10 <- renderUI({
     d <- map_data(); if (is.null(d) || nrow(d) == 0) return(NULL)
 
-    raw_cols <- grep("^raw_", names(d), value = TRUE)
-    if (!length(raw_cols)) return(NULL)
-    dims_ordered <- sub("^raw_", "", raw_cols)
-
     top <- d |> arrange(rank) |> head(10)
     if (!nrow(top)) return(NULL)
-
-    multi_ref       <- length(current_ref()) > 1
-    ref_name_lookup <- if (multi_ref) {
-      ref |>
-        filter(suburb_code_2021 %in% current_ref()) |>
-        transmute(code = suburb_code_2021,
-                  label = paste0(display_name, ", ",
-                                 state_abbr[state_name_2021])) |>
-        { \(d) setNames(d$label, d$code) }()
-    } else NULL
 
     # Use the largest match as the bar-scale max (so the top suburb's
     # bar fills the row). Visual spread is more informative than absolute
@@ -2499,105 +2507,53 @@ server <- function(input, output, session) {
 
     render_row <- function(i) {
       r <- as.data.frame(top)[i, , drop = FALSE]
-      vals <- as.numeric(r[, raw_cols])
       match_pct <- r$match * 100
       bar_width_pct <- pmin(100, (r$match / max_v) * 100)
+      nm   <- suburb_code_to_name[[r$suburb_b]] %||% r$suburb_b
+      abbr <- suburb_code_to_abbr[[r$suburb_b]] %||% ""
+      rea_url <- build_realestate_url(nm, abbr)
 
-      # Hover tooltip: per-dim raw-similarity bars + winning-ref label.
-      dim_bars <- map2(vals, dims_ordered, function(v, dc) {
-        tags$div(style = "display:flex; align-items:center; margin:2px 0; gap:6px;",
-          tags$span(style = "width:90px; font-size:10px; color:#444;", dim_labels[dc]),
-          tags$div(style = "flex:1; background:#eee; height:8px; border-radius:2px; position:relative;",
-            tags$div(style = sprintf(
-              "background:%s; height:8px; width:%.0f%%; border-radius:2px;",
-              dim_colors[dc], v * 100))),
-          tags$span(style = "width:36px; text-align:right; font-size:10px;",
-                    sprintf("%.1f%%", v * 100)))
-      })
-      winning_line <- if (multi_ref && !is.null(r$winning_ref) &&
-                          !is.na(r$winning_ref) &&
-                          r$winning_ref %in% names(ref_name_lookup)) {
-        tags$div(style = "font-size: 10px; color: #1f77b4; margin-bottom: 4px;",
-                 sprintf("most similar to %s", ref_name_lookup[[r$winning_ref]]))
-      } else NULL
-
-      tooltip <- tags$div(
-        class = "top10-tooltip",
-        style = paste(
-          "position:absolute; left:100%; top:0; margin-left:10px;",
-          "background:white; border:1px solid #ccc; border-radius:4px;",
-          "box-shadow:0 2px 8px rgba(0,0,0,0.15);",
-          "padding:8px 10px; min-width:260px; z-index:2000;",
-          "display:none; pointer-events:none;"),
-        tags$div(style = "font-weight:bold; font-size:11px; margin-bottom:4px;",
-                 sprintf("%s, %s",
-                         suburb_code_to_name[[r$suburb_b]],
-                         suburb_code_to_abbr[[r$suburb_b]])),
-        tags$div(style = "font-size:10px; color:#666; margin-bottom:6px;",
-                 sprintf("nat. rank %d · %s",
-                         r$national_rank, fmt_pct(r$national_pct))),
-        winning_line,
-        dim_bars)
-
-      # The row: rank label, suburb name, bar, % label. Tooltip on hover.
+      # The row: rank label, clickable suburb name, bar, % label, REA link.
+      # Clicking the name opens the full breakdown as a map popup (the
+      # same one a direct polygon click shows), rather than a hover
+      # tooltip, which often got in the way of the map underneath.
       tags$div(
         class = "top10-row",
         style = paste(
-          "position:relative;",
-          "display:grid; grid-template-columns: 28px 130px 1fr 50px; gap:6px;",
-          "align-items:center; padding:3px 4px; border-radius:3px;",
-          "cursor:default;"),
+          "display:grid; grid-template-columns: 26px 118px 1fr 44px 22px;",
+          "gap:6px; align-items:center; padding:3px 4px; border-radius:3px;"),
         tags$span(style = "font-size:10px; font-weight:bold; color:#666;",
                   sprintf("#%d", r$rank)),
-        tags$span(style = "font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;",
-                  sprintf("%s, %s",
-                          suburb_code_to_name[[r$suburb_b]],
-                          suburb_code_to_abbr[[r$suburb_b]])),
+        tags$a(
+          href = "#",
+          onclick = sprintf(
+            "Shiny.setInputValue('top10_click','%s',{priority:'event'});return false;",
+            r$suburb_b),
+          style = "font-size:11px; white-space:nowrap; overflow:hidden;
+                   text-overflow:ellipsis; color:#2c7fb8; text-decoration:none;
+                   cursor:pointer; border-bottom:1px dashed #2c7fb8;",
+          title = "Click for the full breakdown",
+          sprintf("%s, %s", nm, abbr)),
         tags$div(style = "background:#eee; height:14px; border-radius:3px; position:relative;",
           tags$div(style = sprintf(
             "background:#2c7fb8; height:14px; width:%.1f%%; border-radius:3px;",
             bar_width_pct))),
         tags$span(style = "font-size:10px; text-align:right; color:#333;",
                   sprintf("%.1f%%", match_pct)),
-        tooltip)
+        tags$a(href = rea_url, target = "_blank", rel = "noopener noreferrer",
+               title = "View homes for sale on realestate.com.au",
+               style = "color:#888; text-align:center;",
+               icon("house-chimney", style = "font-size:12px;")))
     }
 
     rows <- lapply(seq_len(nrow(top)), render_row)
 
-    # CSS for hover-reveal (desktop) + tap-to-toggle (touch/mobile).
-    hover_css <- tags$style(HTML("
-      .top10-row:hover { background: #f3f3f3; }
-      .top10-row:hover .top10-tooltip { display: block !important; }
-      .top10-row.tt-open .top10-tooltip { display: block !important; }
-      @media (max-width: 768px) {
-        /* On narrow screens the tooltip's left:100% positioning would run
-           off-screen, anchor it below the row instead, full width. */
-        .top10-tooltip {
-          position: static !important;
-          margin: 4px 0 8px 0 !important;
-          min-width: 0 !important;
-          width: 100% !important;
-        }
-      }
-    "))
-    tap_js <- tags$script(HTML("
-      // Hover doesn't fire on touch devices, so give top-10 rows a tap
-      // toggle as a fallback. Tapping a row shows/hides its breakdown,
-      // tapping it again (or another row) closes it.
-      $(document).off('click.top10tap').on('click.top10tap', '.top10-row', function(e) {
-        var wasOpen = $(this).hasClass('tt-open');
-        $('.top10-row').removeClass('tt-open');
-        if (!wasOpen) $(this).addClass('tt-open');
-      });
-    "))
-
     tagList(
-      hover_css,
-      tap_js,
+      tags$style(HTML(".top10-row:hover { background: #f3f3f3; }")),
       tags$div(style = "font-weight: bold; font-size: 11px; margin-bottom: 4px;",
                "Top 10 by match score"),
       tags$div(style = "font-size: 9px; color: #888; margin-bottom: 6px;",
-               "Hover for per-characteristic breakdown"),
+               "Click a suburb name for its full breakdown"),
       rows
     )
   })
@@ -2933,6 +2889,8 @@ server <- function(input, output, session) {
 
     html <- if (!is.null(row) && nrow(row) == 1) {
       raw_cols <- grep("^raw_", names(row), value = TRUE)
+      active_dims <- names(settings_active())
+      raw_cols <- raw_cols[sub("^raw_", "", raw_cols) %in% active_dims]
       vals <- as.list(as.data.frame(row)[, raw_cols, drop = FALSE])
       names(vals) <- sub("^raw_", "", names(vals))
       win_label <- if (length(current_ref()) > 1) {
@@ -2948,6 +2906,45 @@ server <- function(input, output, session) {
     leafletProxy("map") |>
       clearGroup("clickpop") |>
       addPopups(lng = cl$lng, lat = cl$lat, popup = html, group = "clickpop")
+    popup_open(TRUE)
+  })
+
+  # Clicking a suburb name in the Top 10 panel opens the same detail
+  # popup a direct polygon click would show, anchored at that suburb's
+  # centroid. Reuses match_df() for the row and build_popup() for the
+  # HTML, so the two entry points always render identically.
+  observeEvent(input$top10_click, {
+    code <- input$top10_click; req(code)
+    hit  <- shp_suburb |> dplyr::filter(suburb_code_2021 == code)
+    if (!nrow(hit)) return()
+    co   <- sf::st_coordinates(sf::st_centroid(hit))[1, ]
+    nm   <- suburb_code_to_name[[code]] %||% hit$suburb_name_2021[1]
+    abbr <- suburb_code_to_abbr[[code]] %||% ""
+
+    if (code %in% suburb_info$suburb_code_2021) clicked_suburb(code)
+
+    cdf <- match_df()
+    row <- if (!is.null(cdf)) cdf[cdf$suburb_b == code, , drop = FALSE] else NULL
+
+    html <- if (!is.null(row) && nrow(row) == 1) {
+      raw_cols <- grep("^raw_", names(row), value = TRUE)
+      active_dims <- names(settings_active())
+      raw_cols <- raw_cols[sub("^raw_", "", raw_cols) %in% active_dims]
+      vals <- as.list(as.data.frame(row)[, raw_cols, drop = FALSE])
+      names(vals) <- sub("^raw_", "", names(vals))
+      win_label <- if (length(current_ref()) > 1) {
+        r <- ref |> filter(suburb_code_2021 == row$winning_ref)
+        if (nrow(r) == 1) paste0(r$display_name, ", ",
+                                 state_abbr[r$state_name_2021]) else NULL
+      } else NULL
+      build_popup(nm, abbr, row$match, row$rank,
+                  row$national_rank, row$national_pct, vals, code,
+                  winning_ref_label = win_label)
+    } else build_popup_unranked(nm, abbr, code)
+
+    leafletProxy("map") |>
+      clearGroup("clickpop") |>
+      addPopups(lng = co[1], lat = co[2], popup = html, group = "clickpop")
     popup_open(TRUE)
   })
 }
