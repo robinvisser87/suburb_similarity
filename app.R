@@ -60,6 +60,15 @@ dream_theme_labels <- c(
   nature    = "Nature & climate",
   amenities = "Amenities")
 
+# Same 4-theme colour chips used in the Match Settings modal, hoisted to
+# top level so the new suburb-comparison table (below) can reuse them too.
+theme_group_colours <- c(
+  people    = "#1C8356",
+  urban     = "#5A5156",
+  nature    = "#325A9B",
+  amenities = "#B10DA1"
+)
+
 # Similarity is now always the average of each active theme's own mean
 # (people / urban / nature / amenities, per dream_theme_dims above), not a
 # flat mean of every individual indicator. A theme with zero selected
@@ -570,17 +579,41 @@ info_fact <- function(label, value) {
 }
 
 # A titled group of facts (renders as a card in the panel grid)
-info_group <- function(title, ..., note = NULL) {
-  tags$div(style = "flex: 1 1 150px; min-width: 140px; max-width: 240px;
-                    border: 1px solid #e8e8e8; border-radius: 6px;
-                    padding: 6px 8px; background: #fcfcfc;",
-    tags$div(style = "font-size:10px; font-weight:600; color:#999;
-                      text-transform:uppercase; letter-spacing:0.5px;
-                      margin-bottom:3px;", title),
-    ...,
+info_group <- function(title, ..., note = NULL, collapsible = FALSE, group_id = NULL) {
+  content <- tagList(...,
     if (!is.null(note))
       tags$div(style = "font-size:10px; color:#aaa; margin-top:4px;
                         font-style:italic;", note))
+
+  card_style <- "flex: 1 1 150px; min-width: 140px; max-width: 240px;
+                border: 1px solid #e8e8e8; border-radius: 6px;
+                padding: 6px 8px; background: #fcfcfc;"
+
+  if (!collapsible) {
+    tags$div(style = card_style,
+      tags$div(style = "font-size:10px; font-weight:600; color:#999;
+                        text-transform:uppercase; letter-spacing:0.5px;
+                        margin-bottom:3px;", title),
+      content)
+  } else {
+    tid <- paste0("infogrp-", group_id %||% gsub("[^a-zA-Z0-9]", "", title))
+    tags$div(style = card_style,
+      tags$div(
+        onclick = sprintf(
+          "var el=document.getElementById('%s');
+           var open = el.style.display !== 'none';
+           el.style.display = open ? 'none' : 'block';
+           this.querySelector('.infogrp-caret').textContent = open ? '\u25b8' : '\u25be';",
+          tid),
+        style = "cursor:pointer; display:flex; align-items:center; gap:5px;
+                 font-size:10px; font-weight:600; color:#999;
+                 text-transform:uppercase; letter-spacing:0.5px;
+                 margin-bottom:3px;",
+        tags$span(class = "infogrp-caret",
+                  style = "font-size:8px; width:8px;", "\u25be"),
+        title),
+      tags$div(id = tid, style = "display:block;", content))
+  }
 }
 
 # Full info panel for one suburb. When `show_header = FALSE` the suburb
@@ -592,7 +625,8 @@ info_group <- function(title, ..., note = NULL) {
 build_info_panel <- function(code, ref_code = NULL, show_header = TRUE,
                               groups = c("Place", "Climate", "Landscape",
                                          "People", "Diversity", "Housing",
-                                         "Socioeconomic", "Work", "Voting")) {
+                                         "Socioeconomic", "Work", "Voting"),
+                              collapsible = FALSE) {
   d <- get_info(code)
   name <- suburb_code_to_name[[code]] %||% code
   abbr <- suburb_code_to_abbr[[code]] %||% ""
@@ -614,11 +648,17 @@ build_info_panel <- function(code, ref_code = NULL, show_header = TRUE,
                 else "click any suburb on the map to update"))
   } else NULL
 
+  # group_id is prefixed with the suburb code so collapse/expand toggles
+  # stay independent when multiple suburbs' panels are on the same page
+  # at once (e.g. the Compare page), rather than colliding on the group
+  # name alone.
+  gid <- function(name) paste0(code, "_", name)
+
   # Build groups as a named list, then keep only those requested. This keeps
   # the source of truth (what each group contains) in one place while letting
   # callers choose which ones to render.
   all_groups <- list(
-    Place = info_group("Place",
+    Place = info_group("Place", collapsible = collapsible, group_id = gid("place"),
       info_fact("Remoteness",  fmt_na(d$remoteness)),
       info_fact("Density",     fmt_num(d$density, 0, " /km\u00b2")),
       info_fact("Coast",       fmt_na(d$coast_class)),
@@ -626,26 +666,26 @@ build_info_panel <- function(code, ref_code = NULL, show_header = TRUE,
       info_fact("Terrain",     fmt_na(d$dominant_slope_class)),
       info_fact("Elevation",   fmt_na(d$dominant_elev_class))),
 
-    Climate = info_group("Climate",
+    Climate = info_group("Climate", collapsible = collapsible, group_id = gid("climate"),
       info_fact("Avg max temp",  fmt_num(d$tmax_annual, 1, "\u00b0C")),
       info_fact("Avg min temp",  fmt_num(d$tmin_annual, 1, "\u00b0C")),
       info_fact("Avg monthly rain", fmt_num(d$annual_rain, 0, " mm")),
       info_fact("Wettest month", fmt_na(d$peak_rain_month)),
       info_fact("Driest month",  fmt_na(d$driest_month))),
 
-    Landscape = info_group("Landscape",
+    Landscape = info_group("Landscape", collapsible = collapsible, group_id = gid("landscape"),
       info_fact("Setting",        fmt_na(d$landscape_type)),
       info_fact("Natural veg",    fmt_num(d$pct_natural_veg_landcover, 0, "%")),
       info_fact("Dominant veg",   fmt_na(d$dominant_vegetation)),
       info_fact("Water",          fmt_na(d$water_character))),
 
-    People = info_group("People",
+    People = info_group("People", collapsible = collapsible, group_id = gid("people"),
       info_fact("Population",  fmt_num(d$population, 0)),
       info_fact("Median age",  fmt_num(d$median_age, 0)),
       info_fact("Age profile", fmt_na(d$age_archetype)),
       info_fact("Households",  fmt_na(d$household_archetype))),
 
-    Diversity = info_group("Diversity",
+    Diversity = info_group("Diversity", collapsible = collapsible, group_id = gid("diversity"),
       info_fact("Birthplace",   fmt_na(d$diversity_archetype)),
       info_fact("Top region",   sprintf("%s (%s)",
                   fmt_na(d$dominant_region),
@@ -653,27 +693,27 @@ build_info_panel <- function(code, ref_code = NULL, show_header = TRUE,
       info_fact("Indigenous",   fmt_num(d$pct_indigenous, 1, "%")),
       info_fact("Religion",     fmt_na(d$religion_archetype))),
 
-    Housing = info_group("Housing",
+    Housing = info_group("Housing", collapsible = collapsible, group_id = gid("housing"),
       info_fact("Tenure",          fmt_na(d$tenure_archetype)),
       info_fact("Dwellings",       fmt_na(d$dwelling_archetype)),
       info_fact("Typical size",    fmt_na(d$dominant_bedrooms)),
       info_fact("Mortgage repayments", fmt_percentile(d$mortgage_percentile)),
       info_fact("Rent",                fmt_percentile(d$rent_percentile))),
 
-    Socioeconomic = info_group("Socioeconomic",
+    Socioeconomic = info_group("Socioeconomic", collapsible = collapsible, group_id = gid("socioeconomic"),
       info_fact("Income",      fmt_na(d$income_archetype)),
       info_fact("Household income", fmt_percentile(d$income_percentile)),
       info_fact("Education",   fmt_na(d$education_archetype)),
       info_fact("Labour force", fmt_na(d$lfs_archetype))),
 
-    Work = info_group("Work",
+    Work = info_group("Work", collapsible = collapsible, group_id = gid("work"),
       info_fact("Economy",     fmt_na(d$economy_type)),
       info_fact("Workforce",   fmt_na(d$workforce_character)),
       tags$div(style = "font-size:11px; color:#777; margin-top:3px;",
                tags$span(style = "color:#999;", "Top industries: "),
                fmt_na(d$top3_industries))),
 
-    Voting = info_group("Voting",
+    Voting = info_group("Voting", collapsible = collapsible, group_id = gid("voting"),
       info_fact("Lean",        fmt_na(d$lean_category)),
       info_fact("Leading party '25", fmt_na(d$dominant_party_2025)),
       note = "Booth-level where available, otherwise electorate-level")
@@ -688,6 +728,138 @@ build_info_panel <- function(code, ref_code = NULL, show_header = TRUE,
     header,
     tags$div(style = "display:flex; flex-wrap:wrap; gap:8px;", chosen)
   )
+}
+
+# ===== Suburb comparison table (Compare page) =============================
+# Builds the Overall/theme/dimension grid for the comparison page. Rows:
+# "Overall match", then one row per theme (each expandable to reveal its
+# individual dimensions), one column per suburb. Reference suburbs show as
+# a labelled anchor column with no score (matching yourself is meaningless);
+# compared suburbs show their actual computed match, sourced from
+# `compare_df` (the output of the compare_data() reactive).
+build_compare_table <- function(ref_codes, other_codes, compare_df, selected_dims) {
+  all_codes <- c(ref_codes, other_codes)
+  n_cols    <- length(all_codes)
+  if (n_cols == 0) return(NULL)
+
+  col_w <- sprintf("minmax(90px, 1fr)")
+  grid_style <- sprintf(
+    "display:grid; grid-template-columns: 170px repeat(%d, %s);
+     gap:1px; align-items:center; background:#e8e8e8;", n_cols, col_w)
+
+  cell <- function(content, header = FALSE, is_ref = FALSE, align = "center") {
+    tags$div(style = sprintf(
+      "background:%s; padding:5px 8px; font-size:11px; text-align:%s;
+       %s", if (is_ref) "#f5f5f5" else "white", align,
+      if (header) "font-weight:600;" else ""),
+      content)
+  }
+
+  row_of <- function(label_cell, value_fn, extra_style = "") {
+    tagList(
+      tags$div(style = paste("background:white; padding:5px 8px;
+                              font-size:11px; font-weight:500;", extra_style),
+               label_cell),
+      lapply(all_codes, function(code) {
+        is_ref <- code %in% ref_codes
+        cell(value_fn(code, is_ref), is_ref = is_ref)
+      }))
+  }
+
+  get_row <- function(code) {
+    if (code %in% ref_codes || is.null(compare_df)) return(NULL)
+    r <- compare_df[compare_df$suburb_b == code, , drop = FALSE]
+    if (nrow(r) != 1) return(NULL)
+    r
+  }
+
+  # Header row: suburb names, reference columns marked.
+  header_row <- row_of(
+    tags$span("Suburb"),
+    function(code, is_ref) {
+      nm   <- suburb_code_to_name[[code]] %||% code
+      abbr <- suburb_code_to_abbr[[code]] %||% ""
+      tags$div(
+        tags$div(style = "font-weight:600;", sprintf("%s, %s", nm, abbr)),
+        if (is_ref) tags$div(style = "font-size:9px; color:#888;
+                                      text-transform:uppercase;
+                                      letter-spacing:0.4px;", "Reference"))
+    })
+
+  # Overall match row.
+  overall_row <- row_of(
+    tags$b("Overall match"),
+    function(code, is_ref) {
+      if (is_ref) return(tags$span(style = "color:#aaa;", "\u2014"))
+      r <- get_row(code)
+      if (is.null(r)) tags$span(style = "color:#aaa;", "\u2014")
+      else tags$b(sprintf("%.1f%%", r$match * 100))
+    },
+    extra_style = "font-size:12px;")
+
+  # One block per theme: a toggleable header row + hidden detail rows.
+  theme_blocks <- lapply(names(dream_theme_dims), function(theme_id) {
+    dims <- intersect(sort(dream_theme_dims[[theme_id]]), selected_dims)
+    theme_score <- function(code) {
+      r <- get_row(code)
+      if (is.null(r)) return(NA_real_)
+      cols <- paste0("score_", dims)
+      cols <- cols[cols %in% names(r)]
+      if (!length(cols)) return(NA_real_)
+      mean(as.numeric(unlist(r[1, cols])), na.rm = TRUE)
+    }
+
+    toggle_id <- paste0("cmp-theme-", theme_id)
+    theme_row <- row_of(
+      tags$div(
+        onclick = sprintf(
+          "var el=document.getElementById('%s');
+           var open = el.style.display !== 'none';
+           el.style.display = open ? 'none' : 'contents';
+           this.querySelector('.cmp-caret').textContent = open ? '\u25b8' : '\u25be';",
+          toggle_id),
+        style = "cursor:pointer; display:flex; align-items:center; gap:6px;",
+        tags$span(class = "cmp-caret",
+                  style = "font-size:9px; color:#888; width:8px;", "\u25b8"),
+        tags$span(
+          style = sprintf(
+            "font-size:10px; font-weight:600; color:white; background:%s;
+             padding:1px 8px; border-radius:8px; letter-spacing:0.3px;",
+            theme_group_colours[[theme_id]]),
+          dream_theme_labels[[theme_id]])),
+      function(code, is_ref) {
+        if (is_ref) return(tags$span(style = "color:#aaa;", "\u2014"))
+        if (!length(dims)) return(tags$span(style = "color:#ccc;", "off"))
+        v <- theme_score(code)
+        if (is.na(v)) tags$span(style = "color:#aaa;", "\u2014")
+        else sprintf("%.1f%%", v * 100)
+      })
+
+    dim_rows <- tags$div(
+      id = toggle_id, style = "display:none;",
+      lapply(dims, function(d) {
+        row_of(
+          tags$div(style = "padding-left:16px; font-size:10.5px; color:#555;",
+                   tags$span(style = sprintf(
+                     "display:inline-block; width:8px; height:8px;
+                      border-radius:2px; background:%s; margin-right:5px;",
+                     dim_colors[[d]]), NULL),
+                   dim_labels[[d]]),
+          function(code, is_ref) {
+            if (is_ref) return(tags$span(style = "color:#aaa;", "\u2014"))
+            r <- get_row(code)
+            col <- paste0("score_", d)
+            if (is.null(r) || !col %in% names(r) || is.na(r[[col]][1])) {
+              tags$span(style = "color:#aaa;", "\u2014")
+            } else sprintf("%.1f%%", r[[col]][1] * 100)
+          })
+      }))
+
+    tagList(theme_row, dim_rows)
+  })
+
+  tags$div(style = grid_style,
+    header_row, overall_row, theme_blocks)
 }
 
 # Compact comparison strip for list cards: the match's headline archetypes,
@@ -925,6 +1097,11 @@ ui <- function(request) fluidPage(
                        class = "btn-outline-secondary",
                        style = "margin-right: 4px;",
                        title = "Build your dream suburb"),
+          actionButton("open_compare", label = NULL,
+                       icon = icon("code-compare"),
+                       class = "btn-outline-secondary",
+                       style = "margin-right: 4px;",
+                       title = "Compare suburbs"),
           downloadButton("export_csv", label = NULL,
                          icon = icon("file-arrow-down"),
                          class = "btn-outline-secondary",
@@ -942,6 +1119,10 @@ ui <- function(request) fluidPage(
 
   # Row 2: centred input controls + right-aligned Map/List toggle.
   # Same 3-column flexbox trick: selectors sit in the true centre.
+  # This entire block (through the Map/List conditionalPanels below) only
+  # shows on the main search page - the Compare page (added further down)
+  # is a fully separate page, not another view_mode.
+  conditionalPanel(condition = "output.page_is_main",
   fluidRow(
     column(width = 12,
       tags$div(
@@ -1097,6 +1278,49 @@ ui <- function(request) fluidPage(
                   type = 4, color = "#2c7fb8", size = 0.8,
                   caption = "Finding matches"))
   )
+  ),  # end conditionalPanel(page_is_main)
+
+  # ----- Compare page -------------------------------------------------
+  conditionalPanel(condition = "output.page_is_compare",
+    tags$div(style = "padding: 10px 4px;",
+      tags$div(style = "display:flex; align-items:center; gap:10px;
+                        margin: 10px 0 14px 0;",
+        actionButton("compare_back", "Back to search",
+                    icon = icon("arrow-left"),
+                    class = "btn-outline-secondary btn-sm"),
+        tags$h4("Compare suburbs", style = "margin:0; font-size:15px;
+                                            font-weight:600; color:#444;")),
+
+      tags$div(style = "display:flex; gap:20px; flex-wrap:wrap;
+                        align-items:flex-start; margin-bottom:14px;",
+        tags$div(style = "min-width:280px;",
+          tags$label("Reference suburb(s)", style = "font-size:12px;
+                                                      font-weight:600;"),
+          virtualSelectInput("compare_refs", NULL,
+                             choices = ref_choices, selected = character(0),
+                             multiple = TRUE, width = "100%", search = TRUE,
+                             placeholder = "Pick one or more references\u2026",
+                             optionsCount = 8, showValueAsTags = TRUE,
+                             autoSelectFirstOption = FALSE),
+          conditionalPanel(
+            condition = "input.compare_refs && input.compare_refs.length > 1",
+            radioButtons("compare_mode", NULL,
+                        choices  = c("Closest to any individual reference" = "max",
+                                     "Closest to all references on average" = "mean"),
+                        selected = "max", inline = TRUE))),
+
+        tags$div(style = "min-width:280px;",
+          uiOutput("compare_others_label", inline = TRUE),
+          virtualSelectInput("compare_others", NULL,
+                             choices = ref_choices, selected = character(0),
+                             multiple = TRUE, width = "100%", search = TRUE,
+                             placeholder = "Pick suburbs to compare\u2026",
+                             optionsCount = 8, showValueAsTags = TRUE,
+                             maxValues = 9, autoSelectFirstOption = FALSE))),
+
+      uiOutput("compare_body")
+    )
+  )
 )
 
 # ===== Server =============================================================
@@ -1114,6 +1338,19 @@ server <- function(input, output, session) {
   # the map_zoom dropdown but read directly (no UI round-trip) so the
   # auto-fit check below can never race against a stale/unset input$map_zoom.
   zoom_mode       <- reactiveVal("auto")
+
+  # Which top-level page is showing: "main" (search/map/list) or
+  # "compare" (the suburb-comparison page). A separate page, not a
+  # view_mode value, since Compare has its own reference/others pickers
+  # and doesn't share the main search's results.
+  page_mode <- reactiveVal("main")
+  output$page_is_main    <- reactive({ page_mode() == "main" })
+  output$page_is_compare <- reactive({ page_mode() == "compare" })
+  outputOptions(output, "page_is_main",    suspendWhenHidden = FALSE)
+  outputOptions(output, "page_is_compare", suspendWhenHidden = FALSE)
+
+  observeEvent(input$open_compare, { page_mode("compare") })
+  observeEvent(input$compare_back, { page_mode("main") })
 
   # Suburb whose facts are shown in the info panel (NULL = panel hidden)
   clicked_suburb  <- reactiveVal(NULL)
@@ -1603,13 +1840,8 @@ server <- function(input, output, session) {
 
     # Group into the same 4 themes used in the dream-suburb modal, so the
     # two surfaces stay conceptually consistent. Within each theme, dims
-    # are alphabetised.
-    theme_group_colours <- c(
-      people    = "#1C8356",
-      urban     = "#5A5156",
-      nature    = "#325A9B",
-      amenities = "#B10DA1"
-    )
+    # are alphabetised. (theme_group_colours is defined globally, shared
+    # with the suburb-comparison table.)
     theme_ordered <- lapply(dream_theme_dims, function(dims)
       intersect(sort(dims), all_dim_codes))
 
@@ -2946,6 +3178,124 @@ server <- function(input, output, session) {
       clearGroup("clickpop") |>
       addPopups(lng = co[1], lat = co[2], popup = html, group = "clickpop")
     popup_open(TRUE)
+  })
+
+  # ===== Compare page =====================================================
+  # Enforce the 10-suburb total cap: as references are added, the max
+  # number of "other" suburbs shrinks. Trim any excess selection rather
+  # than blocking it outright, since the picker itself has no dynamic
+  # max-selection update available.
+  observeEvent(list(input$compare_refs, input$compare_others), {
+    n_ref <- length(input$compare_refs %||% character(0))
+    allowed <- max(0, 10 - n_ref)
+    others <- input$compare_others %||% character(0)
+    if (length(others) > allowed) {
+      updateVirtualSelect(session, "compare_others",
+                          selected = head(others, allowed))
+    }
+  }, ignoreInit = TRUE)
+
+  # Scores every "other" suburb against the Compare page's own reference
+  # selection. Deliberately independent of the main search's current_ref()/
+  # match_df() - the two pages don't share results, only settings_active()
+  # (which characteristics count) stays global. Mirrors match_df()'s
+  # single/multi-reference aggregation logic exactly (see compute_match
+  # calls there), just scoped to a hand-picked suburb set instead of
+  # ranked nationally.
+  compare_data <- reactive({
+    ref_codes   <- input$compare_refs   %||% character(0)
+    other_codes <- input$compare_others %||% character(0)
+    if (length(ref_codes) == 0 || length(other_codes) == 0) return(NULL)
+
+    setts <- settings_active()
+    mode  <- input$compare_mode %||% "max"
+
+    rs_list <- setNames(lapply(ref_codes, function(code) {
+      cached <- raw_cache[[code]]
+      if (is.null(cached)) {
+        cached <- load_raw(code)
+        raw_cache[[code]] <- cached
+      }
+      cached
+    }), ref_codes)
+
+    med_list <- map(rs_list, function(rs) {
+      raw_cols <- grep("^raw_", names(rs), value = TRUE)
+      setNames(
+        sapply(raw_cols, function(col) median(rs[[col]], na.rm = TRUE)),
+        sub("^raw_", "", raw_cols))
+    })
+
+    per_ref <- imap(rs_list, function(rs, ref_code) {
+      meds <- med_list[[ref_code]]
+      df   <- compute_match(rs, setts, meds)
+      if (is.null(df) || nrow(df) == 0) return(NULL)
+      df |> mutate(winning_ref = ref_code, .before = 1)
+    })
+    per_ref <- compact(per_ref)
+    if (length(per_ref) == 0) return(NULL)
+
+    if (length(per_ref) == 1 || mode == "max") {
+      combined <- bind_rows(per_ref) |>
+        group_by(suburb_b) |>
+        slice_max(match, n = 1, with_ties = FALSE) |>
+        ungroup()
+    } else {
+      stacked    <- bind_rows(per_ref)
+      raw_cols   <- grep("^raw_",   names(stacked), value = TRUE)
+      score_cols <- grep("^score_", names(stacked), value = TRUE)
+      win_per <- stacked |>
+        group_by(suburb_b) |>
+        slice_max(match, n = 1, with_ties = FALSE) |>
+        ungroup() |>
+        select(suburb_b, winning_ref)
+      combined <- stacked |>
+        group_by(suburb_b) |>
+        summarise(match = mean(match, na.rm = TRUE),
+                  across(all_of(c(raw_cols, score_cols)),
+                        \(x) mean(x, na.rm = TRUE)),
+                  .groups = "drop") |>
+        left_join(win_per, by = "suburb_b") |>
+        filter(!is.nan(match))
+    }
+
+    combined |> filter(suburb_b %in% other_codes)
+  })
+
+  output$compare_others_label <- renderUI({
+    n_allowed <- max(0, 10 - length(input$compare_refs %||% character(0)))
+    tags$label(sprintf("Suburbs to compare (up to %d)", n_allowed),
+               style = "font-size:12px; font-weight:600;")
+  })
+
+  output$compare_body <- renderUI({
+    ref_codes   <- input$compare_refs   %||% character(0)
+    other_codes <- input$compare_others %||% character(0)
+    setts       <- settings_active()
+
+    if (length(ref_codes) == 0) {
+      return(tags$div(style = "color:#888; font-size:13px; padding:20px 0;",
+                      "Pick at least one reference suburb to begin."))
+    }
+
+    tagList(
+      if (length(other_codes) == 0) {
+        tags$div(style = "color:#888; font-size:13px; margin-bottom:16px;",
+                "Pick one or more suburbs above to see match scores.")
+      } else {
+        tags$div(style = "overflow-x:auto; margin-bottom:20px;",
+          build_compare_table(ref_codes, other_codes,
+                              compare_data(), names(setts)))
+      },
+
+      tags$div(style = "display:flex; gap:10px; overflow-x:auto;
+                        padding-bottom:10px;",
+        lapply(c(ref_codes, other_codes), function(code) {
+          tags$div(style = "flex:0 0 260px;",
+                   build_info_panel(code, ref_code = ref_codes,
+                                    show_header = TRUE, collapsible = TRUE))
+        }))
+    )
   })
 }
 
