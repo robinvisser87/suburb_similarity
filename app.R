@@ -98,37 +98,28 @@ dim_labels <- c(
   schools = "Schools"
 )
 
-# Cohesive 23-colour palette: Polychrome-derived, designed for high-cardinality
-# categorical encodings with strong perceptual separation between adjacent
-# hues. Reasonably colourblind-friendly across types. The original 14 (geo/
-# people/place dims) keep their existing colours; the 9 amenity dims added
-# below use a distinct sub-palette so the new "Amenities" group reads as its
-# own visual family in charts that mix both sets.
-dim_colors <- c(
-  coast         = "#5A5156",   # graphite (geographic)
-  density       = "#E4761B",   # orange (settlement intensity)
-  diversity     = "#1CBE4F",   # green (people / mixing)
-  employment    = "#FE00FA",   # magenta (jobs)
-  housing       = "#F8A19F",   # salmon (dwelling)
-  landcover     = "#822E1C",   # brown (terrain category)
-  people        = "#1C8356",   # forest green (demographics)
-  remoteness    = "#16FF32",   # lime (settlement category)
-  socioeconomic = "#3283FE",   # blue (income / occupation)
-  terrain       = "#FEAF16",   # amber (relief)
-  vegetation    = "#2ED9FF",   # cyan (botany)
-  voting        = "#B00068",   # crimson (political)
-  water         = "#325A9B",   # navy (hydrology)
-  weather       = "#85660D",   # olive (climate)
-  dining        = "#C4451C",   # burnt orange (hospitality)
-  transport     = "#90AD1C",   # olive-lime (mobility)
-  food          = "#FBE426",   # yellow (fresh food)
-  culture       = "#AA0DFE",   # violet (arts)
-  communityinfra= "#F6222E",   # red (civic)
-  tertiary      = "#B10DA1",   # magenta-purple (education)
-  health        = "#FF6E54",   # coral (wellbeing)
-  kinder        = "#7ED7D1",   # teal (early years)
-  schools       = "#00B5F7"    # sky blue (education)
-)
+# Colours are generated as tints WITHIN each theme's own colour (rather
+# than 23 unrelated hues), so a chart mixing dimensions from different
+# themes reads first by theme family, then by individual dimension -
+# e.g. every Amenities dim is a shade of the same magenta/purple, every
+# Nature & climate dim a shade of the same navy blue.
+make_theme_shades <- function(base_hex, n) {
+  if (n <= 1) return(rep(base_hex, max(n, 1)))
+  # Interpolate from the theme's own colour toward a light tint of itself.
+  # Capped at 70 (not 100 = white) so even the lightest shade in a large
+  # theme (Amenities has 9 dims) stays a recognisable tint rather than
+  # washing out - same lesson as the earlier fix to the map's rank-colour
+  # palette, which had the same near-white problem at its light end.
+  ramp <- grDevices::colorRampPalette(c(base_hex, "#FFFFFF"))(100)
+  idx  <- round(seq(1, 70, length.out = n))
+  ramp[idx]
+}
+
+dim_colors <- unlist(lapply(names(dream_theme_dims), function(theme_id) {
+  dims   <- sort(dream_theme_dims[[theme_id]])
+  shades <- make_theme_shades(theme_group_colours[[theme_id]], length(dims))
+  setNames(shades, dims)
+}))
 
 state_abbr <- c("New South Wales" = "NSW", "Victoria" = "VIC", "Queensland" = "QLD",
                 "South Australia" = "SA", "Western Australia" = "WA",
@@ -573,9 +564,10 @@ fmt_percentile <- function(x) {
 # One labelled fact line inside a group
 info_fact <- function(label, value) {
   tags$div(style = "display:flex; justify-content:space-between; gap:8px;
-                    font-size:12px; padding:1px 0;",
-    tags$span(style = "color:#777;", label),
-    tags$span(style = "text-align:right; font-weight:500;", value))
+                    font-size:12px; padding:1.5px 0;",
+    tags$span(style = "color:#9CA3AF; font-size:11px;", label),
+    tags$span(style = "text-align:right; font-weight:600; color:#333333;",
+              value))
 }
 
 # A titled group of facts (renders as a card in the panel grid)
@@ -823,8 +815,8 @@ build_compare_table <- function(ref_codes, other_codes, compare_df, selected_dim
                   style = "font-size:9px; color:#888; width:8px;", "\u25b8"),
         tags$span(
           style = sprintf(
-            "font-size:10px; font-weight:600; color:white; background:%s;
-             padding:1px 8px; border-radius:8px; letter-spacing:0.3px;",
+            "font-size:10.5px; font-weight:700; color:white; background:%s;
+             padding:2px 9px; border-radius:8px; letter-spacing:0.3px;",
             theme_group_colours[[theme_id]]),
           dream_theme_labels[[theme_id]])),
       function(code, is_ref) {
@@ -832,26 +824,29 @@ build_compare_table <- function(ref_codes, other_codes, compare_df, selected_dim
         if (!length(dims)) return(tags$span(style = "color:#ccc;", "off"))
         v <- theme_score(code)
         if (is.na(v)) tags$span(style = "color:#aaa;", "\u2014")
-        else sprintf("%.1f%%", v * 100)
-      })
+        else tags$b(style = "font-size:12.5px; color:#222222;",
+                    sprintf("%.1f%%", v * 100))
+      },
+      extra_style = "font-size:11.5px; padding-top:7px; padding-bottom:7px;")
 
     dim_rows <- tags$div(
       id = toggle_id, style = "display:none;",
       lapply(dims, function(d) {
         row_of(
-          tags$div(style = "padding-left:16px; font-size:10.5px; color:#555;",
+          tags$div(style = "padding-left:16px; font-size:10px; color:#9CA3AF;",
                    tags$span(style = sprintf(
-                     "display:inline-block; width:8px; height:8px;
+                     "display:inline-block; width:6px; height:6px;
                       border-radius:2px; background:%s; margin-right:5px;",
                      dim_colors[[d]]), NULL),
                    dim_labels[[d]]),
           function(code, is_ref) {
-            if (is_ref) return(tags$span(style = "color:#aaa;", "\u2014"))
+            if (is_ref) return(tags$span(style = "color:#ccc;", "\u2014"))
             r <- get_row(code)
             col <- paste0("score_", d)
             if (is.null(r) || !col %in% names(r) || is.na(r[[col]][1])) {
-              tags$span(style = "color:#aaa;", "\u2014")
-            } else sprintf("%.1f%%", r[[col]][1] * 100)
+              tags$span(style = "color:#ccc;", "\u2014")
+            } else tags$span(style = "color:#9CA3AF; font-weight:400;",
+                             sprintf("%.1f%%", r[[col]][1] * 100))
           })
       }))
 
@@ -1077,11 +1072,16 @@ ui <- function(request) fluidPage(
         # Left spacer to balance the right cluster's width
         tags$div(style = "flex: 1;"),
         # Centred title
-        tags$h3(
-          "Suburb similarity explorer",
-          style = "margin: 0; font-size: 13px; font-weight: 600; color: #666;
-                   text-transform: uppercase; letter-spacing: 0.5px;
-                   text-align: center;"
+        tags$div(style = "text-align: center;",
+          tags$h3(
+            "SUBURB SIMILARITY EXPLORER",
+            style = "margin: 0; font-size: 19px; font-weight: 600;
+                     color: #333333; letter-spacing: 0.2px;"
+          ),
+          tags$div(
+            "Find suburbs with similar characteristics",
+            style = "font-size: 12px; color: #6B7280; margin-top: 1px;"
+          )
         ),
         # Right-aligned button cluster
         tags$div(
@@ -1845,16 +1845,28 @@ server <- function(input, output, session) {
     theme_ordered <- lapply(dream_theme_dims, function(dims)
       intersect(sort(dims), all_dim_codes))
 
-    group_header <- function(theme_id, label, colour, all_on) {
+    group_header <- function(theme_id, label, colour, all_on, summary_text) {
+      toggle_id <- paste0("dimrows-", theme_id)
       tags$div(
         style = "display:flex; align-items:center; gap:8px;
                  margin: 10px 0 4px 0;",
         tags$div(
-          style = sprintf(
-            "font-size:11px; font-weight:600; letter-spacing:0.5px;
-             color:white; background:%s; display:inline-block;
-             padding:2px 10px; border-radius:10px;", colour),
-          toupper(label)),
+          onclick = sprintf(
+            "var el=document.getElementById('%s');
+             var open = el.style.display !== 'none';
+             el.style.display = open ? 'none' : 'block';
+             this.querySelector('.settings-caret').textContent = open ? '\u25b8' : '\u25be';",
+            toggle_id),
+          style = "cursor:pointer; display:flex; align-items:center; gap:6px;",
+          tags$span(class = "settings-caret",
+                    style = "font-size:9px; color:#888; width:8px;", "\u25b8"),
+          tags$div(
+            style = sprintf(
+              "font-size:11px; font-weight:600; letter-spacing:0.5px;
+               color:white; background:%s; display:inline-block;
+               padding:2px 10px; border-radius:10px;", colour),
+            toupper(label)),
+          tags$span(style = "font-size:11px; color:#888;", summary_text)),
         materialSwitch(paste0("theme_check_", theme_id), label = NULL,
                        value = all_on, status = "primary", inline = TRUE))
     }
@@ -1905,10 +1917,18 @@ server <- function(input, output, session) {
         checkable_dims <- setdiff(dims_in_theme, filtered_dims)
         all_on <- length(checkable_dims) > 0 &&
           all(checkable_dims %in% names(setts))
+        n_selected <- sum(dims_in_theme %in% names(setts))
+        n_total    <- length(dims_in_theme)
+        summary_text <- sprintf("%d of %d selected", n_selected, n_total)
         tagList(
           group_header(theme_id, dream_theme_labels[[theme_id]],
-                       theme_group_colours[[theme_id]], all_on),
-          lapply(dims_in_theme, build_row))
+                       theme_group_colours[[theme_id]], all_on, summary_text),
+          # Collapsed by default - reduces the modal's density on open.
+          # Individual switches/radios underneath still report their live
+          # values to the server regardless of CSS visibility, so nothing
+          # about Apply/Reset changes.
+          tags$div(id = paste0("dimrows-", theme_id), style = "display:none;",
+                   lapply(dims_in_theme, build_row)))
       }))
 
     modalDialog(
@@ -1926,7 +1946,7 @@ server <- function(input, output, session) {
       tags$div(style = "font-size: 11px; color: #666; margin-bottom: 12px;",
         "Your match score is the average of each theme below that has at ",
         "least one characteristic switched on. A theme left entirely off ",
-        "doesn't count against you, it's simply left out of the average, ",
+        "is simply left out of the average, ",
         "not treated as 0."),
       tags$hr(style = "margin: 8px 0;"),
       tags$label("characteristics and how to score them:"),
@@ -2212,11 +2232,11 @@ server <- function(input, output, session) {
     }
 
     tags$div(
-      style = "background: #fff8e6; border: 1px solid #f0c14b;
+      style = "background: #F3F0FA; border: 1px solid #B9A6DD;
                border-radius: 4px; padding: 6px 12px; margin-bottom: 8px;
                font-size: 12px; display: flex; align-items: center; gap: 10px;
                flex-wrap: wrap;",
-      tags$span(style = "color: #b8860b;",
+      tags$span(style = "color: #7B5FA8;",
                 icon("wand-magic-sparkles")),
       tags$b("Dream suburb:"),
       do.call(tagList, joined),
@@ -2783,7 +2803,7 @@ server <- function(input, output, session) {
     tagList(
       tags$style(HTML(".top10-row:hover { background: #f3f3f3; }")),
       tags$div(style = "font-weight: bold; font-size: 11px; margin-bottom: 4px;",
-               "Top 10 by match score"),
+               "Closest matches"),
       tags$div(style = "font-size: 9px; color: #888; margin-bottom: 6px;",
                "Click a suburb name for its full breakdown"),
       rows
@@ -3063,6 +3083,23 @@ server <- function(input, output, session) {
       leafletProxy("map") |> clearGroup("overview_pin")
     }
   })
+
+  # Persistent accent border around whichever suburb the side panel is
+  # currently showing - distinct from the reference suburb's own black
+  # fill, so it's clear at a glance which suburb's detail you're looking
+  # at (as opposed to only relying on the side panel text). Skipped when
+  # the selected suburb IS the reference, since that already has its own
+  # distinct styling and doesn't need a second, overlapping treatment.
+  observeEvent(list(clicked_suburb(), current_ref()), {
+    code  <- clicked_suburb() %||% current_ref()[1]
+    proxy <- leafletProxy("map") |> clearGroup("selected_highlight")
+    if (is.null(code) || code %in% current_ref()) return()
+    hit <- shp_suburb |> dplyr::filter(suburb_code_2021 == code)
+    if (!nrow(hit)) return()
+    proxy |> addPolygons(data = hit, group = "selected_highlight",
+                         fill = FALSE, color = "#2C7FB8", weight = 4,
+                         opacity = 1)
+  }, ignoreInit = FALSE)
 
   output$map_side_panel <- renderUI({
     code <- clicked_suburb() %||% current_ref()[1]
