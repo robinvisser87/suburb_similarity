@@ -1144,7 +1144,8 @@ ui <- function(request) fluidPage(
                                  multiple = TRUE, width = "100%", search = TRUE,
                                  placeholder = "Pick one or more suburbs…", optionsCount = 8,
                                  showValueAsTags = TRUE, autoSelectFirstOption = FALSE,
-                                 keepAlwaysOpen = FALSE)),
+                                 keepAlwaysOpen = FALSE,
+                                 disableOptionGroupCheckbox = TRUE)),
           conditionalPanel(
             condition = "input.ref_sub && input.ref_sub.length > 1",
             div(style = "display:flex; align-items:center; gap:4px;",
@@ -1301,7 +1302,8 @@ ui <- function(request) fluidPage(
                              multiple = TRUE, width = "100%", search = TRUE,
                              placeholder = "Pick one or more references\u2026",
                              optionsCount = 8, showValueAsTags = TRUE,
-                             autoSelectFirstOption = FALSE),
+                             autoSelectFirstOption = FALSE,
+                             disableOptionGroupCheckbox = TRUE),
           conditionalPanel(
             condition = "input.compare_refs && input.compare_refs.length > 1",
             radioButtons("compare_mode", NULL,
@@ -1316,7 +1318,8 @@ ui <- function(request) fluidPage(
                              multiple = TRUE, width = "100%", search = TRUE,
                              placeholder = "Pick suburbs to compare\u2026",
                              optionsCount = 8, showValueAsTags = TRUE,
-                             maxValues = 9, autoSelectFirstOption = FALSE))),
+                             maxValues = 9, autoSelectFirstOption = FALSE,
+                             disableOptionGroupCheckbox = TRUE))),
 
       uiOutput("compare_body")
     )
