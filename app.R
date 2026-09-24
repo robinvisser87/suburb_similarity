@@ -1853,8 +1853,8 @@ server <- function(input, output, session) {
         tags$div(
           onclick = sprintf(
             "var el=document.getElementById('%s');
-             var open = el.style.display !== 'none';
-             el.style.display = open ? 'none' : 'block';
+             var open = el.style.maxHeight !== '0px';
+             el.style.maxHeight = open ? '0px' : '3000px';
              this.querySelector('.settings-caret').textContent = open ? '\u25b8' : '\u25be';",
             toggle_id),
           style = "cursor:pointer; display:flex; align-items:center; gap:6px;",
@@ -1924,10 +1924,15 @@ server <- function(input, output, session) {
           group_header(theme_id, dream_theme_labels[[theme_id]],
                        theme_group_colours[[theme_id]], all_on, summary_text),
           # Collapsed by default - reduces the modal's density on open.
-          # Individual switches/radios underneath still report their live
-          # values to the server regardless of CSS visibility, so nothing
-          # about Apply/Reset changes.
-          tags$div(id = paste0("dimrows-", theme_id), style = "display:none;",
+          # Uses max-height/overflow rather than display:none: materialSwitch
+          # is a JS-widget (bootstrap-switch) that measures its DOM element's
+          # width at init time, and initialising while display:none gives it
+          # a width of 0, leaving the switch unable to correctly track its
+          # own on/off state once shown. max-height keeps the element in
+          # normal layout flow the whole time (just visually clipped), so
+          # the widget always initialises correctly.
+          tags$div(id = paste0("dimrows-", theme_id),
+                   style = "max-height:0px; overflow:hidden;",
                    lapply(dims_in_theme, build_row)))
       }))
 
