@@ -957,6 +957,17 @@ ui <- function(request) fluidPage(
   margin-left: 4px;
 }
 
+/* .map-container wraps the map's withSpinner() output. Needs its own
+   positioning context (position:relative) so shinycssloaders' spinner
+   overlay - which absolutely-positions itself against the nearest
+   positioned ancestor - anchors correctly to the map area rather than
+   to some other ancestor further up the tree. Without this the spinner
+   can render in the wrong place or not visibly at all. */
+.map-container {
+  position: relative;
+  width: 100%;
+}
+
 /* ===== Mobile responsive overrides ===== */
 @media (max-width: 768px) {
   /* Map + side info panel: stack instead of sitting side by side */
