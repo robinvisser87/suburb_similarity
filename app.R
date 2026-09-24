@@ -1846,20 +1846,11 @@ server <- function(input, output, session) {
       intersect(sort(dims), all_dim_codes))
 
     group_header <- function(theme_id, label, colour, all_on, summary_text) {
-      toggle_id <- paste0("dimrows-", theme_id)
       tags$div(
         style = "display:flex; align-items:center; gap:8px;
                  margin: 10px 0 4px 0;",
         tags$div(
-          onclick = sprintf(
-            "var el=document.getElementById('%s');
-             var open = el.style.maxHeight !== '0px';
-             el.style.maxHeight = open ? '0px' : '3000px';
-             this.querySelector('.settings-caret').textContent = open ? '\u25b8' : '\u25be';",
-            toggle_id),
-          style = "cursor:pointer; display:flex; align-items:center; gap:6px;",
-          tags$span(class = "settings-caret",
-                    style = "font-size:9px; color:#888; width:8px;", "\u25b8"),
+          style = "display:flex; align-items:center; gap:6px;",
           tags$div(
             style = sprintf(
               "font-size:11px; font-weight:600; letter-spacing:0.5px;
@@ -1923,17 +1914,7 @@ server <- function(input, output, session) {
         tagList(
           group_header(theme_id, dream_theme_labels[[theme_id]],
                        theme_group_colours[[theme_id]], all_on, summary_text),
-          # Collapsed by default - reduces the modal's density on open.
-          # Uses max-height/overflow rather than display:none: materialSwitch
-          # is a JS-widget (bootstrap-switch) that measures its DOM element's
-          # width at init time, and initialising while display:none gives it
-          # a width of 0, leaving the switch unable to correctly track its
-          # own on/off state once shown. max-height keeps the element in
-          # normal layout flow the whole time (just visually clipped), so
-          # the widget always initialises correctly.
-          tags$div(id = paste0("dimrows-", theme_id),
-                   style = "max-height:0px; overflow:hidden;",
-                   lapply(dims_in_theme, build_row)))
+          lapply(dims_in_theme, build_row))
       }))
 
     modalDialog(
