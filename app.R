@@ -628,7 +628,7 @@ build_info_panel <- function(code, ref_code = NULL, show_header = TRUE,
       sprintf("No detailed information available for %s, %s.", name, abbr)))
   }
 
-  is_ref <- !is.null(ref_code) && length(ref_code) > 0 && code == ref_code[1]
+  is_ref <- !is.null(ref_code) && length(ref_code) > 0 && code %in% ref_code
 
   header <- if (show_header) {
     tags$div(style = "display:flex; align-items:baseline; gap:10px;
@@ -866,13 +866,29 @@ comparison_fields <- c(
   "Economy" = "economy_type"
 )
 
-build_comparison_strip <- function(ref_info, match_info) {
-  if (is.null(ref_info) || is.null(match_info)) return(NULL)
+# Which dream theme supplies the reference value for each strip field:
+# age & income are "People & culture", tenure & economy are "Urban fabric".
+comparison_field_theme <- c(
+  age_archetype    = "people",
+  income_archetype = "people",
+  tenure_archetype = "urban",
+  economy_type     = "urban"
+)
+
+# `ref_vals` is a named list: column -> character vector of reference
+# values (one per reference suburb). A single-reference run passes one
+# value per field; dream mode passes the values of every suburb picked
+# for the field's theme, and an empty vector when that theme was left
+# blank. The chip is ticked when the match equals any reference value.
+build_comparison_strip <- function(ref_vals, match_info) {
+  if (is.null(ref_vals) || is.null(match_info)) return(NULL)
   cells <- lapply(names(comparison_fields), function(lbl) {
     col <- comparison_fields[[lbl]]
-    rv  <- ref_info[[col]];  mv <- match_info[[col]]
+    rv  <- ref_vals[[col]] %||% character(0)
+    rv  <- unique(as.character(rv[!is.na(rv)]))
+    mv  <- match_info[[col]]
     if (is.null(mv) || is.na(mv)) return(NULL)
-    same <- !is.null(rv) && !is.na(rv) && identical(rv, mv)
+    same <- length(rv) > 0 && mv %in% rv
     tags$span(
       style = sprintf(
         "font-size:11px; padding:2px 8px; border-radius:10px; border:1px solid %s;
@@ -882,7 +898,8 @@ build_comparison_strip <- function(ref_info, match_info) {
         if (same) "#33691e" else "#666"),
       title = if (same) sprintf("%s: same as reference (%s)", lbl, mv)
               else      sprintf("%s: %s (reference: %s)", lbl, mv,
-                                if (is.null(rv) || is.na(rv)) "\u2014" else rv),
+                                if (!length(rv)) "\u2014"
+                                else paste(rv, collapse = " / ")),
       paste0(lbl, ": ", mv, if (same) " \u2713" else ""))
   })
   cells <- cells[!vapply(cells, is.null, logical(1))]
@@ -1370,6 +1387,15 @@ server <- function(input, output, session) {
   #   filter_coast = TRUE / FALSE
   # NULL when not active (default single-reference mode).
   dream_refs_active <- reactiveVal(NULL)
+
+  # The suburbs the current results are actually measured against: every
+  # suburb picked in the dream modal while dream mode is on, otherwise
+  # the single/multi reference selection. Use this (not current_ref())
+  # anywhere the UI marks or describes "the reference".
+  active_ref_codes <- reactive({
+    dream <- dream_refs_active()
+    if (!is.null(dream)) unique(unlist(dream$theme_refs)) else current_ref()
+  })
 
   # Update the Filters button label whenever any cat filter changes
   observe({
@@ -2391,8 +2417,9 @@ server <- function(input, output, session) {
       mutate(suburb_name_2021 = coalesce(unname(suburb_code_to_name[suburb_code_2021]),
                                           suburb_name_2021))
     
+    in_dream <- !is.null(dream_refs_active())
     ref_poly <- shp_suburb |>
-      filter(suburb_code_2021 %in% current_ref()) |>
+      filter(suburb_code_2021 %in% active_ref_codes()) |>
       mutate(suburb_name_2021 = coalesce(unname(suburb_code_to_name[suburb_code_2021]),
                                           suburb_name_2021))
 
@@ -2401,8 +2428,9 @@ server <- function(input, output, session) {
       pull(sa4_name_2021) |> unique()
     sa4_lines <- shp_sa4 |> filter(sa4_name_2021 %in% shown_sa4)
 
-    # Build a "winning ref" label only when more than one reference is selected
-    multi_ref       <- length(current_ref()) > 1
+    # Build a "winning ref" label only when more than one reference is
+    # selected. Not in dream mode: there winning_ref is always "dream".
+    multi_ref       <- !in_dream && length(current_ref()) > 1
     ref_name_lookup <- if (multi_ref) {
       ref |>
         filter(suburb_code_2021 %in% current_ref()) |>
@@ -2468,7 +2496,9 @@ server <- function(input, output, session) {
       addPolygons(data = ref_poly, group = "ref",
                   fillColor = "#111", fillOpacity = 0.65,
                   color = "black", weight = 1.4,
-                  label = ~paste0(suburb_name_2021, " (reference)")) |>
+                  label = ~paste0(suburb_name_2021,
+                                  if (in_dream) " (dream reference)"
+                                  else " (reference)")) |>
       addPolygons(data = sa4_lines, group = "sa4",
                   fill = FALSE, color = "black",
                   weight = 0.8, opacity = 0.6,
@@ -2625,14 +2655,22 @@ server <- function(input, output, session) {
     buckets_vec <- vapply(dim_summaries, `[[`, integer(1), "bucket")
     buckets_present <- sort(unique(buckets_vec))
 
-    primary_ref <- ref_codes[1]
-    ref_label <- sprintf("%s, %s",
-      suburb_code_to_name[[primary_ref]] %||% primary_ref,
-      suburb_code_to_abbr[[primary_ref]] %||% "")
-    if (length(ref_codes) > 1) {
-      ref_label <- paste0(ref_label, sprintf(" (and %d other%s)",
-        length(ref_codes) - 1,
-        if (length(ref_codes) > 2) "s" else ""))
+    # In dream-suburb mode the results come from the theme blend, not from
+    # current_ref() (which still holds the last single-reference pick), so
+    # the sentence names the dream suburb instead. The banner above already
+    # spells out which suburbs make up each theme.
+    if (!is.null(dream_refs_active())) {
+      ref_label <- "Your dream suburb"
+    } else {
+      primary_ref <- ref_codes[1]
+      ref_label <- sprintf("%s, %s",
+        suburb_code_to_name[[primary_ref]] %||% primary_ref,
+        suburb_code_to_abbr[[primary_ref]] %||% "")
+      if (length(ref_codes) > 1) {
+        ref_label <- paste0(ref_label, sprintf(" (and %d other%s)",
+          length(ref_codes) - 1,
+          if (length(ref_codes) > 2) "s" else ""))
+      }
     }
 
     bullets <- lapply(buckets_present, function(b) {
@@ -2900,7 +2938,8 @@ server <- function(input, output, session) {
 
     raw_cols <- grep("^raw_", names(top), value = TRUE)
 
-    multi_ref       <- length(current_ref()) > 1
+    dream           <- dream_refs_active()
+    multi_ref       <- is.null(dream) && length(current_ref()) > 1
     ref_name_lookup <- if (multi_ref) {
       ref |>
         filter(suburb_code_2021 %in% current_ref()) |>
@@ -2910,8 +2949,23 @@ server <- function(input, output, session) {
         { \(d) setNames(d$label, d$code) }()
     } else NULL
 
-    # Reference info row for the comparison strip (primary ref only)
-    ref_info_row <- get_info(current_ref()[1])
+    # Reference values for the comparison strip. Single/multi reference:
+    # the primary reference's archetypes. Dream mode: for each field, the
+    # archetypes of every suburb picked for that field's theme.
+    ref_info_row <- if (is.null(dream)) {
+      info <- get_info(current_ref()[1])
+      if (is.null(info)) NULL
+      else lapply(setNames(nm = unname(comparison_fields)),
+                  function(col) info[[col]])
+    } else {
+      lapply(setNames(nm = unname(comparison_fields)), function(col) {
+        codes <- dream$theme_refs[[comparison_field_theme[[col]]]]
+        unlist(lapply(codes, function(c) {
+          info <- get_info(c)
+          if (is.null(info)) NULL else info[[col]]
+        }))
+      })
+    }
 
     rows <- lapply(seq_len(nrow(top)), function(i) {
       r <- as.data.frame(top)[i, , drop = FALSE]
@@ -2984,7 +3038,7 @@ server <- function(input, output, session) {
           tags$div(style = "flex: 2 1 0; min-width: 0;",
                    list_chart_svg(raw_vals, r$match)),
           tags$div(style = "flex: 4 1 0; min-width: 0;",
-                   build_info_panel(code, ref_code = current_ref(),
+                   build_info_panel(code, ref_code = active_ref_codes(),
                                     show_header = FALSE,
                                     groups = c("Place", "People", "Diversity",
                                                "Housing", "Socioeconomic",
@@ -3079,10 +3133,10 @@ server <- function(input, output, session) {
   # at (as opposed to only relying on the side panel text). Skipped when
   # the selected suburb IS the reference, since that already has its own
   # distinct styling and doesn't need a second, overlapping treatment.
-  observeEvent(list(clicked_suburb(), current_ref()), {
-    code  <- clicked_suburb() %||% current_ref()[1]
+  observeEvent(list(clicked_suburb(), active_ref_codes()), {
+    code  <- clicked_suburb() %||% active_ref_codes()[1]
     proxy <- leafletProxy("map") |> clearGroup("selected_highlight")
-    if (is.null(code) || code %in% current_ref()) return()
+    if (is.null(code) || code %in% active_ref_codes()) return()
     hit <- shp_suburb |> dplyr::filter(suburb_code_2021 == code)
     if (!nrow(hit)) return()
     proxy |> addPolygons(data = hit, group = "selected_highlight",
@@ -3090,13 +3144,19 @@ server <- function(input, output, session) {
                          opacity = 1)
   }, ignoreInit = FALSE)
 
+  # Switching into or out of dream mode drops any earlier click, so the
+  # side panel falls back to a suburb from the new reference set.
+  observeEvent(dream_refs_active(), {
+    clicked_suburb(NULL)
+  }, ignoreNULL = FALSE, ignoreInit = TRUE)
+
   output$map_side_panel <- renderUI({
-    code <- clicked_suburb() %||% current_ref()[1]
+    code <- clicked_suburb() %||% active_ref_codes()[1]
     if (is.null(code)) {
       return(tags$div(style = "padding: 12px; color: #888; font-size: 13px;",
         "Click any suburb on the map to see its details here."))
     }
-    build_info_panel(code, ref_code = current_ref(), show_header = TRUE)
+    build_info_panel(code, ref_code = active_ref_codes(), show_header = TRUE)
   })
 
   # --- Click on empty map: find suburb, show popup with "set as reference"
@@ -3151,7 +3211,8 @@ server <- function(input, output, session) {
       raw_cols <- raw_cols[sub("^raw_", "", raw_cols) %in% active_dims]
       vals <- as.list(as.data.frame(row)[, raw_cols, drop = FALSE])
       names(vals) <- sub("^raw_", "", names(vals))
-      win_label <- if (length(current_ref()) > 1) {
+      win_label <- if (is.null(dream_refs_active()) &&
+                       length(current_ref()) > 1) {
         r <- ref |> filter(suburb_code_2021 == row$winning_ref)
         if (nrow(r) == 1) paste0(r$display_name, ", ",
                                  state_abbr[r$state_name_2021]) else NULL
@@ -3190,7 +3251,8 @@ server <- function(input, output, session) {
       raw_cols <- raw_cols[sub("^raw_", "", raw_cols) %in% active_dims]
       vals <- as.list(as.data.frame(row)[, raw_cols, drop = FALSE])
       names(vals) <- sub("^raw_", "", names(vals))
-      win_label <- if (length(current_ref()) > 1) {
+      win_label <- if (is.null(dream_refs_active()) &&
+                       length(current_ref()) > 1) {
         r <- ref |> filter(suburb_code_2021 == row$winning_ref)
         if (nrow(r) == 1) paste0(r$display_name, ", ",
                                  state_abbr[r$state_name_2021]) else NULL
