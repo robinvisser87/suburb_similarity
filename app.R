@@ -249,6 +249,608 @@ region_tree <- ref |>
   transmute(State = state_name_2021, GCC = gcc_name_2021, SA4 = sa4_name_2021) |>
   create_tree(levels = c("State", "GCC", "SA4"))
 
+# ===== Suburb profile panel: sentence + charts ============================
+# Replaces the old text-box info panel in the map side panel and list view.
+# Also drives the Compare page (build_compare_charts). build_info_panel()
+# above is no longer called anywhere and can be deleted.
+#
+# Data:
+#   explanatory/suburb_summary.parquet  one summary_highlight sentence per suburb
+#   explanatory/chart_data.parquet      long format: suburb x subdimension x
+#                                       category (x weather_month) -> value
+#
+# Everything is plain HTML/CSS plus inline SVG for the two monthly charts, so
+# there are no charting dependencies. Styles live in the .st-* CSS block in
+# the UI head; tab switching is the small stApplyTabs() script there too.
+
+suburb_summary <- arrow::read_parquet(r2_path("explanatory/suburb_summary.parquet")) |>
+  as_tibble() |>
+  mutate(suburb_code_2021 = as.character(suburb_code_2021))
+summary_lookup <- setNames(suburb_summary$summary_highlight,
+                           suburb_summary$suburb_code_2021)
+
+chart_data <- arrow::read_parquet(r2_path("explanatory/chart_data.parquet")) |>
+  as_tibble() |>
+  transmute(code     = as.character(suburb_code_2021),
+            sub      = as.character(subdimension),
+            category = as.character(category),
+            month    = as.character(weather_month),
+            valtype  = as.character(valtype),
+            value    = as.numeric(value)) |>
+  filter(!is.na(code), !is.na(value))
+
+# Rain is stored as average mm per day for each month; show mm per month.
+# Guarded on valtype so a future chart_data that already stores monthly
+# totals isn't converted twice.
+local({
+  month_days <- c(Jan = 31, Feb = 28.25, Mar = 31, Apr = 30, May = 31, Jun = 30,
+                  Jul = 31, Aug = 31, Sep = 30, Oct = 31, Nov = 30, Dec = 31)
+  i <- chart_data$sub == "Rain" & chart_data$valtype == "monthly_median"
+  chart_data$value[i] <<- chart_data$value[i] * month_days[chart_data$month[i]]
+})
+
+# Percentile rows have no category; use the subdimension name so every row
+# can be looked up the same way.
+chart_data$category <- coalesce(chart_data$category, chart_data$sub)
+pct_subs  <- unique(chart_data$sub[chart_data$valtype == "percentile"])
+chart_data$valtype <- NULL
+
+# Which share subdimensions hold a suburb's full distribution (missing
+# category = 0) rather than only its top N. Industry / Occupation /
+# Vegetation are stored as top N in the current chart_data; once the
+# generator stores them in full this flips automatically and the selected
+# suburb gets true values for the reference suburb's top categories.
+topn_n <- c(Industry = 5, Occupation = 5, Vegetation = 3)
+full_dist_subs <- local({
+  share_subs <- setdiff(unique(chart_data$sub[is.na(chart_data$month)]), pct_subs)
+  per <- chart_data |>
+    filter(sub %in% names(topn_n)) |>
+    count(sub, code) |>
+    group_by(sub) |> summarise(med = median(n), .groups = "drop")
+  full_topn <- per$sub[per$med > topn_n[per$sub]]
+  c(setdiff(share_subs, names(topn_n)), full_topn)
+})
+all_cats <- chart_data |>
+  filter(sub %in% full_dist_subs) |>
+  distinct(sub, category) |>
+  { \(d) split(d$category, d$sub) }()
+
+# Row index per suburb: fast lookup without filtering 1.2M rows each time.
+chart_idx <- split(seq_len(nrow(chart_data)), chart_data$code)
+
+suburb_series <- function(code) {
+  i <- chart_idx[[code]]
+  if (is.null(i)) return(NULL)
+  chart_data[i, c("sub", "category", "month", "value")]
+}
+
+# Add 0 rows for categories a suburb doesn't have (full-distribution
+# subdimensions only, and only where the suburb has some data for it).
+zero_fill <- function(d) {
+  if (is.null(d) || !nrow(d)) return(d)
+  have <- intersect(unique(d$sub), full_dist_subs)
+  add <- lapply(have, function(s) {
+    miss <- setdiff(all_cats[[s]], d$category[d$sub == s])
+    if (length(miss)) tibble(sub = s, category = miss, month = NA_character_, value = 0)
+  })
+  bind_rows(d, add)
+}
+
+# Australian benchmark: median across suburbs for each category (and month).
+# Zero-filled for full distributions so suburbs without a category count.
+# Percentiles need no lookup: the national median is the 50th by definition.
+aus_median <- local({
+  monthly <- chart_data |>
+    filter(!is.na(month)) |>
+    group_by(sub, category, month) |>
+    summarise(value = median(value), .groups = "drop")
+  shares <- chart_data |> filter(is.na(month), !sub %in% pct_subs)
+  n_sub  <- shares |> distinct(sub, code) |> count(sub, name = "n_sub")
+  share_med <- shares |>
+    group_by(sub, category) |>
+    summarise(vals = list(value), .groups = "drop") |>
+    left_join(n_sub, by = "sub") |>
+    mutate(value = pmap_dbl(list(vals, n_sub, sub), function(v, n, s) {
+      if (s %in% full_dist_subs) median(c(v, rep(0, max(0, n - length(v)))))
+      else median(v)
+    }), month = NA_character_) |>
+    select(sub, category, month, value)
+  bind_rows(monthly, share_med)
+})
+
+# Reference data, cached per reference set: mean across the reference
+# suburbs (lo/hi = range, used for the temperature band) plus each
+# reference's own rows (used for the percentile dots).
+profile_ref_cache <- new.env(parent = emptyenv())
+profile_ref_data <- function(ref_codes) {
+  ref_codes <- unique(ref_codes[!is.na(ref_codes)])
+  key <- paste(sort(ref_codes), collapse = ",")
+  if (!is.null(profile_ref_cache[[key]])) return(profile_ref_cache[[key]])
+  each <- bind_rows(lapply(ref_codes, function(cd) {
+    d <- zero_fill(suburb_series(cd))
+    if (is.null(d) || !nrow(d)) NULL else mutate(d, code = cd)
+  }))
+  agg <- if (nrow(each)) {
+    each |>
+      group_by(sub, category, month) |>
+      summarise(lo = min(value), hi = max(value), value = mean(value),
+                .groups = "drop")
+  } else NULL
+  out <- list(agg = agg, each = each, codes = ref_codes,
+              n = length(unique(each$code)))
+  profile_ref_cache[[key]] <- out
+  out
+}
+
+# ---- Chart definitions ----------------------------------------------------
+# Tabs and the charts in each follow the theme / subdimension structure of
+# chart_data. order: explicit category order, or "desc" (by the reference's
+# value). top_n: show the reference's top N categories.
+profile_tabs <- list(
+  people = list(label = "People & culture",       colour = "#1C8356",
+                charts = c("age", "household", "birth", "education", "lfs",
+                           "voting")),
+  urban  = list(label = "Urban fabric & economy", colour = "#5A5156",
+                charts = c("dwelling", "bedrooms", "housing_cost",
+                           "industry", "occupation")),
+  nature = list(label = "Nature & climate",       colour = "#325A9B",
+                charts = c("temp", "rain", "veg"))
+)
+
+profile_charts <- list(
+  age = list(title = "Age", type = "bar", subs = "Age",
+             order = c("Children 0-14", "Youth 15-24", "Young adults 25-34",
+                       "Adults 35-54", "Mature 55-64", "Seniors 65-84",
+                       "Elderly 85+")),
+  household = list(title = "People by household role", type = "bar",
+                   subs = "Household composition", order = "desc"),
+  birth = list(title = "Region of birth", type = "bar",
+               subs = "Region of birth", order = "desc"),
+  education = list(title = "Highest qualification", type = "bar",
+                   subs = "Educational attainment",
+                   order = c("Postgraduate degree", "Bachelor degree",
+                             "Diploma / Adv Diploma", "Certificate III/IV",
+                             "Certificate I/II", "No post-school qualification")),
+  # Household income sits in this card (same Socioeconomic dimension) so the
+  # People tab is 6 cards / 3 rows and fits the side panel without scrolling.
+  lfs = list(title = "Work & income", type = "bar",
+             subs = "Labour force status",
+             order = c("Employed full-time", "Employed part-time",
+                       "Employed away", "Unemployed", "Not in labour force"),
+             extra = "income"),
+  income = list(title = "Household income", type = "pct",
+                subs = "Household income",
+                labels = c("Household income" = "Household income")),
+  voting = list(title = "Primary vote, 2025 federal election", type = "bar",
+                subs = "Voting",
+                order = c("Labor", "Coalition", "Greens", "Independent", "Other")),
+  dwelling = list(title = "Dwelling type", type = "bar", subs = "Dwelling type",
+                  order = c("Separate house", "Townhouse / terrace",
+                            "Flat / apartment", "Other dwelling")),
+  bedrooms = list(title = "Number of bedrooms", type = "bar",
+                  subs = "Number of bedrooms",
+                  order = c("Studio / no bedroom", "1 bedroom", "2 bedrooms",
+                            "3 bedrooms", "4 bedrooms", "5+ bedrooms")),
+  housing_cost = list(title = "Housing costs", type = "pct",
+                      subs = c("Monthly mortgage", "Weekly rent"),
+                      labels = c("Monthly mortgage" = "Mortgage",
+                                 "Weekly rent" = "Rent")),
+  industry = list(title = "Top industries", type = "bar", subs = "Industry",
+                  top_n = 5),
+  occupation = list(title = "Top occupations", type = "bar", subs = "Occupation",
+                    top_n = 5),
+  temp = list(title = "Temperature (°C, avg daily max / min)", type = "temp",
+              subs = "Temperature"),
+  rain = list(title = "Rainfall (mm per month)", type = "rain", subs = "Rain"),
+  veg  = list(title = "Top native vegetation", type = "bar", subs = "Vegetation",
+              top_n = 3, no_aus = TRUE)
+)
+
+# ---- Chart renderers (return HTML strings) ----------------------------------
+
+st_col_ref <- "#333333"
+st_col_sel <- "#2C7FB8"
+st_col_aus <- "#E07B39"
+
+st_esc <- function(x) htmltools::htmlEscape(x, attribute = TRUE)
+
+st_fmt_share <- function(v) {
+  ifelse(is.na(v), "–",
+         ifelse(v > 0 & v < 0.005, "<1%", sprintf("%.0f%%", v * 100)))
+}
+
+st_ordinal <- function(p) {
+  if (is.na(p)) return("–")
+  n <- round(p * 100)
+  suf <- if (n %% 100 %in% 11:13) "th" else
+    switch(as.character(n %% 10), "1" = "st", "2" = "nd", "3" = "rd", "th")
+  paste0(n, suf)
+}
+
+st_pick <- function(d, subs) {
+  if (is.null(d) || !nrow(d)) return(d[0, , drop = FALSE])
+  d[d$sub %in% subs, , drop = FALSE]
+}
+
+st_val <- function(d, cats, month = NULL) {
+  if (is.null(d) || !nrow(d)) return(rep(NA_real_, length(cats)))
+  if (is.null(month)) d$value[match(cats, d$category)]
+  else d$value[match(paste(cats, month), paste(d$category, d$month))]
+}
+
+st_card <- function(title, body, note = NULL) {
+  paste0('<div class="st-card"><div class="st-card-title">', st_esc(title), '</div>',
+         if (!is.null(note)) paste0('<div class="st-card-note">', st_esc(note), '</div>'),
+         body, '</div>')
+}
+
+st_nodata <- '<div class="st-empty">No data</div>'
+
+
+# A "series" is one coloured thing drawn on every chart:
+#   list(label, col, d = rows (sub, category, month, value [, lo, hi]),
+#        each = per-reference rows for percentile dots (optional),
+#        band = TRUE to shade the lo-hi range on the temperature chart)
+# The side panel / list view pass reference + selected; the Compare page
+# passes one series per suburb. val_label names the series whose value is
+# printed at the right of each row (NULL = no value column).
+
+st_ser_pick <- function(ser, subs) {
+  lapply(ser, function(x) {
+    x$d <- st_pick(x$d, subs)
+    if (!is.null(x$each)) x$each <- st_pick(x$each, subs)
+    x
+  })
+}
+st_has <- function(ser) Filter(function(x) !is.null(x$d) && nrow(x$d) > 0, ser)
+
+# Horizontal bars, one per series, with an orange tick for the Australian
+# median. basis = rows used to order categories / pick the top N
+# (the reference, or mean of references).
+st_bar_chart <- function(spec, ser, a, basis = NULL, val_label = NULL) {
+  ser <- st_has(ser)
+  if (!length(ser)) return(st_nodata)
+  if (is.null(basis) || !nrow(basis)) basis <- ser[[1]]$d
+  pool <- unique(unlist(lapply(ser, function(x) x$d$category)))
+  cats <- if (!is.null(spec$top_n)) {
+    head(basis$category[order(-basis$value)], spec$top_n)
+  } else if (identical(spec$order, "desc")) {
+    pool[order(-coalesce(st_val(basis, pool), 0))]
+  } else {
+    c(intersect(spec$order, pool), setdiff(pool, spec$order))
+  }
+  vals <- lapply(ser, function(x) st_val(x$d, cats))
+  av   <- if (isTRUE(spec$no_aus)) rep(NA_real_, length(cats)) else st_val(a, cats)
+  xmax <- max(c(unlist(vals), av, 0.01), na.rm = TRUE)
+  w    <- function(v) sprintf("%.1f", 100 * pmin(v, xmax) / xmax)
+  n    <- length(ser)
+  h    <- if (n <= 2) 6 else if (n <= 4) 5 else if (n <= 6) 4 else 3
+  vi   <- if (is.null(val_label)) NA else match(val_label, vapply(ser, `[[`, "", "label"))
+  row_class <- if (is.null(val_label)) "st-row st-row-nov" else "st-row"
+  rows <- vapply(seq_along(cats), function(i) {
+    tip <- paste(c(
+      vapply(seq_len(n), function(k) paste0(ser[[k]]$label, ": ", st_fmt_share(vals[[k]][i])), ""),
+      if (!is.na(av[i])) paste("Australia (median):", st_fmt_share(av[i]))),
+      collapse = "\n")
+    bars <- paste(vapply(seq_len(n), function(k) {
+      v <- vals[[k]][i]
+      sprintf('<div class="st-bar" style="width:%s%%; height:%dpx; background:%s;"></div>',
+              if (is.na(v)) "0" else w(v), h, ser[[k]]$col)
+    }, ""), collapse = "")
+    paste0(
+      '<div class="', row_class, '"', if (n > 2) ' style="padding:3px 0;"',
+      ' title="', st_esc(paste0(cats[i], "\n", tip)), '">',
+      '<div class="st-lab">', st_esc(cats[i]), '</div>',
+      '<div class="st-track" style="gap:', if (n > 4) 1 else 2, 'px;">', bars,
+      if (!is.na(av[i])) paste0('<div class="st-aus" style="left:', w(av[i]), '%"></div>'),
+      '</div>',
+      if (!is.null(val_label))
+        paste0('<div class="st-v">', st_fmt_share(if (is.na(vi)) NA else vals[[vi]][i]), '</div>'),
+      '</div>')
+  }, character(1))
+  paste(rows, collapse = "")
+}
+
+# National percentile strips: a dot per series (one per reference suburb
+# where a series carries several), orange tick at the 50th = Australian median.
+st_pct_chart <- function(spec, ser, val_label = NULL) {
+  pv <- function(x, sb) {
+    if (!is.null(x$each) && nrow(x$each)) x$each$value[x$each$sub == sb]
+    else { v <- st_val(x$d, sb); v[!is.na(v)] }
+  }
+  row_class <- if (is.null(val_label)) "st-row st-row-nov" else "st-row"
+  rows <- vapply(spec$subs, function(sb) {
+    vals <- lapply(ser, pv, sb = sb)
+    if (!length(unlist(vals))) return("")
+    dots <- paste(unlist(lapply(seq_along(ser), function(k) vapply(vals[[k]], function(v) sprintf(
+      '<div class="st-dot" style="left:%.1f%%; background:%s;"></div>', 100 * v, ser[[k]]$col), ""))),
+      collapse = "")
+    tip <- paste(vapply(seq_along(ser), function(k) if (!length(vals[[k]])) "" else
+      paste0(ser[[k]]$label, ": ", paste(vapply(vals[[k]], st_ordinal, ""), collapse = ", ")), ""),
+      collapse = "\n")
+    shown <- if (is.null(val_label)) NULL else {
+      k <- match(val_label, vapply(ser, `[[`, "", "label"))
+      v <- if (is.na(k)) numeric(0) else vals[[k]]
+      if (length(v) == 1) st_ordinal(v) else "–"
+    }
+    paste0(
+      '<div class="', row_class, '" title="', st_esc(paste0(spec$labels[[sb]], " (national percentile)\n", tip)), '">',
+      '<div class="st-lab">', st_esc(spec$labels[[sb]]), '</div>',
+      '<div class="st-ptrack"><div class="st-pmid"></div>', dots, '</div>',
+      if (!is.null(shown)) paste0('<div class="st-v">', shown, '</div>'),
+      '</div>')
+  }, character(1))
+  rows <- rows[nzchar(rows)]
+  if (!length(rows)) return(st_nodata)
+  paste0(paste(rows, collapse = ""),
+         '<div class="', if (is.null(val_label)) "st-axis st-axis-nov" else "st-axis",
+         '"><span></span><span>national percentile</span></div>')
+}
+
+# Shared SVG frame for the two monthly charts.
+st_svg_frame <- function(ymin, ymax, ticks, W, H, ml, mr, mt, mb, body) {
+  yy <- function(v) mt + (ymax - v) / (ymax - ymin) * (H - mt - mb)
+  grid <- paste(vapply(ticks, function(t) sprintf(
+    '<line x1="%d" x2="%d" y1="%.1f" y2="%.1f" stroke="#eee"/><text x="%d" y="%.1f" class="st-svgt" text-anchor="end">%s</text>',
+    ml, W - mr, yy(t), yy(t), ml - 3, yy(t) + 3, format(t)), ""), collapse = "")
+  xs <- ml + (seq_len(12) - 0.5) * (W - ml - mr) / 12
+  mlab <- paste(sprintf('<text x="%.1f" y="%d" class="st-svgt" text-anchor="middle">%s</text>',
+                        xs, H - 3, substr(month.abb, 1, 1)), collapse = "")
+  sprintf('<svg viewBox="0 0 %d %d" class="st-svg" preserveAspectRatio="xMidYMid meet">%s%s%s</svg>',
+          W, H, grid, mlab, body)
+}
+
+st_month_vals <- function(d, v = NULL, col = "value") {
+  if (is.null(d) || !nrow(d)) return(rep(NA_real_, 12))
+  if (is.null(v)) d[[col]][match(month.abb, d$month)]
+  else d[[col]][match(paste(v, month.abb), paste(d$category, d$month))]
+}
+
+st_polyline <- function(xs, ys, col, extra = "", sw = 1.8, title = NULL) {
+  ok <- !is.na(ys)
+  if (!any(ok)) return("")
+  sprintf('<polyline fill="none" stroke="%s" stroke-width="%.1f" %s points="%s">%s</polyline>',
+          col, sw, extra, paste(sprintf("%.1f,%.1f", xs[ok], ys[ok]), collapse = " "),
+          if (is.null(title)) "" else paste0("<title>", st_esc(title), "</title>"))
+}
+
+st_temp_chart <- function(ser, a, val_label = NULL) {
+  ser <- st_has(ser)
+  if (!length(ser)) return(st_nodata)
+  W <- 300; H <- 132; ml <- 24; mr <- 26; mt <- 6; mb <- 16
+  all_v <- c(unlist(lapply(ser, function(x) c(
+               st_month_vals(x$d, "tmax"), st_month_vals(x$d, "tmin"),
+               if (isTRUE(x$band)) c(st_month_vals(x$d, "tmax", "hi"), st_month_vals(x$d, "tmin", "lo"))))),
+             st_month_vals(a, "tmax"), st_month_vals(a, "tmin"))
+  ymin <- floor(min(all_v, na.rm = TRUE) / 5) * 5
+  ymax <- ceiling(max(all_v, na.rm = TRUE) / 5) * 5
+  if (ymax - ymin < 10) ymax <- ymin + 10
+  xs <- ml + (seq_len(12) - 0.5) * (W - ml - mr) / 12
+  yy <- function(v) mt + (ymax - v) / (ymax - ymin) * (H - mt - mb)
+  sw <- if (length(ser) > 4) 1.4 else 1.8
+  band <- function(x, v) {
+    lo <- st_month_vals(x$d, v, "lo"); hi <- st_month_vals(x$d, v, "hi")
+    if (!isTRUE(x$band) || any(is.na(c(lo, hi)))) return("")
+    pts <- c(sprintf("%.1f,%.1f", xs, yy(hi)), rev(sprintf("%.1f,%.1f", xs, yy(lo))))
+    sprintf('<polygon fill="%s" fill-opacity="0.13" stroke="none" points="%s"/>',
+            x$col, paste(pts, collapse = " "))
+  }
+  lab_ser <- ser[[max(1, match(val_label %||% "", vapply(ser, `[[`, "", "label")), na.rm = TRUE)]]
+  lab <- function(v, txt) {
+    y <- st_month_vals(lab_ser$d, v)[12]
+    if (is.na(y)) "" else sprintf('<text x="%.1f" y="%.1f" class="st-svgt">%s</text>',
+                                  xs[12] + 4, yy(y) + 3, txt)
+  }
+  body <- paste0(
+    paste(vapply(ser, function(x) paste0(band(x, "tmax"), band(x, "tmin")), ""), collapse = ""),
+    st_polyline(xs, yy(st_month_vals(a, "tmax")), st_col_aus, 'stroke-dasharray="3,2"', 1.6, "Australia (median) max"),
+    st_polyline(xs, yy(st_month_vals(a, "tmin")), st_col_aus, 'stroke-dasharray="3,2"', 1.6, "Australia (median) min"),
+    paste(vapply(ser, function(x) paste0(
+      st_polyline(xs, yy(st_month_vals(x$d, "tmax")), x$col, sw = sw, title = paste(x$label, "max")),
+      st_polyline(xs, yy(st_month_vals(x$d, "tmin")), x$col, sw = sw, title = paste(x$label, "min"))), ""),
+      collapse = ""),
+    lab("tmax", "max"), lab("tmin", "min"))
+  ticks <- seq(ymin, ymax, by = if (ymax - ymin > 20) 10 else 5)
+  st_svg_frame(ymin, ymax, ticks, W, H, ml, mr, mt, mb, body)
+}
+
+# Columns side by side for up to 3 series; lines beyond that so a Compare
+# page with many suburbs stays readable.
+st_rain_chart <- function(ser, a) {
+  ser <- st_has(ser)
+  if (!length(ser)) return(st_nodata)
+  W <- 300; H <- 132; ml <- 24; mr <- 6; mt <- 6; mb <- 16
+  vals <- lapply(ser, function(x) st_month_vals(x$d))
+  av   <- st_month_vals(a)
+  top  <- max(c(unlist(vals), av), na.rm = TRUE)
+  step <- if (top > 200) 100 else if (top > 80) 50 else if (top > 40) 20 else 10
+  ymax <- ceiling(top / step) * step
+  gw <- (W - ml - mr) / 12
+  xs <- ml + (seq_len(12) - 0.5) * gw
+  yy <- function(v) mt + (ymax - v) / ymax * (H - mt - mb)
+  k  <- length(ser)
+  series_svg <- if (k <= 3) {
+    bw <- gw * 0.72 / k
+    paste(vapply(seq_len(k), function(j) paste(vapply(seq_len(12), function(i) {
+      v <- vals[[j]][i]
+      if (is.na(v)) return("")
+      sprintf('<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" fill="%s"><title>%s, %s: %.0f mm</title></rect>',
+              ml + (i - 1) * gw + gw * 0.14 + (j - 1) * bw, yy(v), bw, yy(0) - yy(v),
+              ser[[j]]$col, st_esc(ser[[j]]$label), month.abb[i], v)
+    }, ""), collapse = ""), ""), collapse = "")
+  } else {
+    paste(vapply(seq_len(k), function(j)
+      st_polyline(xs, yy(vals[[j]]), ser[[j]]$col, sw = 1.4, title = ser[[j]]$label), ""),
+      collapse = "")
+  }
+  aus <- if (all(is.na(av))) "" else paste0(
+    st_polyline(xs, yy(av), st_col_aus, 'stroke-dasharray="3,2"', 1.6, "Australia (median)"),
+    paste(sprintf('<circle cx="%.1f" cy="%.1f" r="1.8" fill="%s"/>', xs, yy(av), st_col_aus),
+          collapse = ""))
+  st_svg_frame(0, ymax, seq(0, ymax, by = step), W, H, ml, mr, mt, mb, paste0(series_svg, aus))
+}
+
+# One card's body for a chart spec. ser must already be subset to spec$subs.
+st_body <- function(spec, ser, basis, val_label) {
+  a <- st_pick(aus_median, spec$subs)
+  switch(spec$type,
+    bar  = st_bar_chart(spec, ser, a, st_pick(basis, spec$subs), val_label),
+    pct  = st_pct_chart(spec, ser, val_label),
+    temp = st_temp_chart(ser, a, val_label),
+    rain = st_rain_chart(ser, a))
+}
+
+# Tabs + panes. card_fn(id) returns a card's HTML ("" to skip it);
+# note_fn(tab_id) returns an optional note shown above that tab's grid.
+st_tabs_html <- function(card_fn, note_fn = function(tab, any_cards) "", grid_class = "st-grid") {
+  tab_ids <- names(profile_tabs)
+  tabs <- paste0('<div class="st-tabs">', paste(vapply(seq_along(tab_ids), function(i) {
+    t <- profile_tabs[[tab_ids[i]]]
+    sprintf('<button type="button" class="st-tab%s" data-tab="%s" style="--tabc:%s;">%s</button>',
+            if (i == 1) " active" else "", tab_ids[i], t$colour, st_esc(t$label))
+  }, ""), collapse = ""), '</div>')
+  panes <- paste(vapply(seq_along(tab_ids), function(i) {
+    cards <- vapply(profile_tabs[[tab_ids[i]]]$charts, card_fn, "")
+    sprintf('<div class="st-pane" data-tab="%s"%s>%s<div class="%s">%s</div></div>',
+            tab_ids[i], if (i == 1) "" else ' style="display:none;"',
+            note_fn(tab_ids[i], any(nzchar(cards))), grid_class,
+            paste(cards, collapse = ""))
+  }, ""), collapse = "")
+  HTML(paste0(tabs, panes))
+}
+
+st_card_for <- function(id, ser, basis, val_label) {
+  spec <- profile_charts[[id]]
+  body <- st_body(spec, st_ser_pick(ser, spec$subs), basis, val_label)
+  if (!is.null(spec$extra)) {
+    x <- profile_charts[[spec$extra]]
+    body <- paste0(body, '<div class="st-divider"></div>',
+                   st_body(x, st_ser_pick(ser, x$subs), basis, val_label))
+  }
+  st_card(spec$title, body)
+}
+
+st_empty_rows <- tibble(sub = character(), category = character(),
+                        month = character(), value = numeric())
+
+# ---- Side panel / list view ---------------------------------------------------
+# code:       the suburb being described (reference by default, or the
+#             clicked / listed suburb)
+# ref_codes:  the active reference suburb(s)
+# The displayed suburb is drawn as the blue "selected" series unless it is
+# the only reference, in which case the charts show reference vs Australia.
+build_profile_panel <- function(code, ref_codes, show_header = TRUE,
+                                show_hint = TRUE) {
+  ref_codes <- unique(ref_codes[!is.na(ref_codes)])
+  name   <- suburb_code_to_name[[code]] %||% code
+  abbr   <- suburb_code_to_abbr[[code]] %||% ""
+  is_ref <- code %in% ref_codes
+  rd     <- profile_ref_data(ref_codes)
+  show_sel <- !(is_ref && length(ref_codes) == 1)
+  sel    <- (if (show_sel) zero_fill(suburb_series(code))) %||% st_empty_rows
+  ref_agg <- rd$agg %||% st_empty_rows
+
+  ref_name  <- function(cd) sprintf("%s, %s", suburb_code_to_name[[cd]] %||% cd,
+                                    suburb_code_to_abbr[[cd]] %||% "")
+  ref_label <- if (rd$n == 1) paste(ref_name(rd$codes[1]), "(reference)")
+               else sprintf("Reference (mean of %d)", rd$n)
+  sel_label <- sprintf("%s, %s", name, abbr)
+  sel_has_census <- show_sel && any(sel$sub %in% c("Age", "Dwelling type"))
+
+  ser <- c(
+    if (rd$n > 0) list(list(label = ref_label, col = st_col_ref, d = ref_agg,
+                            each = rd$each, band = rd$n > 1)),
+    if (show_sel) list(list(label = sel_label, col = st_col_sel, d = sel)))
+  val_label <- if (show_sel) sel_label else ref_label
+
+  header <- if (show_header) {
+    tags$div(class = "st-head",
+      tags$span(class = "st-name", sel_label),
+      if (is_ref) tags$span(class = "st-badge", "Reference suburb")
+      else tags$span(class = "st-badge st-badge-sel", "Selected"),
+      if (show_hint) tags$span(class = "st-hint",
+                               "click any suburb on the map to update"))
+  }
+  sentence <- summary_lookup[[code]] %||% NULL
+  legend <- tags$div(class = "st-legend",
+    lapply(ser, function(x) tags$span(
+      tags$span(class = "st-sw", style = sprintf("background:%s;", x$col)), x$label)),
+    tags$span(tags$span(class = "st-sw st-sw-aus"), "Australia (median)"))
+
+  # The panel describes the displayed suburb: when it has no data for a
+  # chart (e.g. no census below 50 residents) the card is left out rather
+  # than showing the reference alone.
+  card_fn <- function(id) {
+    spec <- profile_charts[[id]]
+    if (show_sel && !nrow(st_pick(sel, spec$subs))) return("")
+    st_card_for(id, ser, ref_agg, val_label)
+  }
+  note_fn <- function(tab, any_cards) {
+    if (show_sel && !sel_has_census && tab != "nature")
+      sprintf('<div class="st-card-note">No census data for %s (fewer than 50 residents)%s.</div>',
+              st_esc(name), if (any_cards) "; showing what is available" else "")
+    else ""
+  }
+
+  tags$div(class = "st-panel",
+    header,
+    if (!is.null(sentence)) tags$div(class = "st-sentence", sentence),
+    legend,
+    st_tabs_html(card_fn, note_fn))
+}
+
+# ---- Compare page -------------------------------------------------------------
+# Every suburb picked on the Compare page is its own series in the same
+# charts. References are drawn in greys (matching the reference colour
+# elsewhere in the app), compared suburbs in distinct colours. Top-N and
+# "desc" category orders follow the mean of the references.
+compare_ref_greys <- c("#222222", "#5F5F5F", "#8F8F8F", "#B5B5B5")
+compare_palette   <- c("#2C7FB8", "#1C8356", "#B10DA1", "#D62728", "#17BECF",
+                       "#8C564B", "#9467BD", "#BCBD22", "#E377C2", "#7F7F7F")
+
+build_compare_charts <- function(ref_codes, other_codes) {
+  ref_codes   <- unique(ref_codes[!is.na(ref_codes)])
+  other_codes <- setdiff(unique(other_codes[!is.na(other_codes)]), ref_codes)
+  codes <- c(ref_codes, other_codes)
+  if (!length(codes)) return(NULL)
+  is_ref <- codes %in% ref_codes
+  n_ref  <- sum(is_ref)
+  cols <- c(if (n_ref <= length(compare_ref_greys)) compare_ref_greys[seq_len(n_ref)]
+            else compare_palette[seq_len(n_ref)],
+            setdiff(compare_palette, if (n_ref > length(compare_ref_greys))
+              compare_palette[seq_len(n_ref)])[seq_along(other_codes)])
+  label <- function(cd) sprintf("%s, %s", suburb_code_to_name[[cd]] %||% cd,
+                                suburb_code_to_abbr[[cd]] %||% "")
+  ser <- lapply(seq_along(codes), function(i) list(
+    label = label(codes[i]), col = cols[i],
+    d = zero_fill(suburb_series(codes[i])) %||% st_empty_rows))
+  basis <- profile_ref_data(ref_codes)$agg %||% st_empty_rows
+
+  key <- tags$div(class = "st-compare-key",
+    lapply(seq_along(codes), function(i) tags$div(class = "st-compare-item",
+      tags$div(class = "st-compare-name",
+        tags$span(class = "st-sw", style = sprintf("background:%s;", cols[i])),
+        ser[[i]]$label,
+        if (is_ref[i]) tags$span(class = "st-badge", "Reference")),
+      if (!is.null(summary_lookup[[codes[i]]]))
+        tags$div(class = "st-compare-sentence", summary_lookup[[codes[i]]]))),
+    tags$div(class = "st-compare-item st-compare-aus",
+      tags$div(class = "st-compare-name",
+        tags$span(class = "st-sw st-sw-aus"), "Australia (median)")))
+
+  card_fn <- function(id) {
+    spec <- profile_charts[[id]]
+    if (!length(st_has(st_ser_pick(ser, spec$subs)))) return("")
+    st_card_for(id, ser, basis, NULL)
+  }
+
+  tags$div(class = "st-panel st-compare",
+    tags$div(class = "st-compare-intro",
+             "Hover over a bar, dot or line for exact values."),
+    key,
+    st_tabs_html(card_fn, grid_class = "st-grid st-grid-wide"))
+}
+
 # ===== Helpers ============================================================
 
 # Load all raw_* for one reference suburb 
@@ -1047,6 +1649,56 @@ ui <- function(request) fluidPage(
     padding: 8px 10px;
   }
 }
+
+/* ===== Suburb profile panel (sentence + charts) ===== */
+.st-panel { font-size: 12px; color: #333; }
+.st-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+.st-name { font-size: 16px; font-weight: 700; color: #222; }
+.st-badge { font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px;
+            padding: 2px 7px; border-radius: 8px; background: #333333; color: #fff; }
+.st-badge-sel { background: #2C7FB8; }
+.st-hint { font-size: 11px; color: #999; }
+.st-sentence { font-size: 13px; line-height: 1.4; color: #444; margin: 3px 0 7px; }
+.st-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 11px; color: #555; margin-bottom: 6px; }
+.st-sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.st-sw-aus { width: 3px; height: 12px; border-radius: 0; background: #E07B39; vertical-align: -2px; }
+.st-tabs { display: flex; gap: 2px; border-bottom: 1px solid #e5e5e5; margin-bottom: 8px; }
+.st-tab { border: none; background: none; padding: 5px 10px 6px; font-size: 12px; font-weight: 600;
+          color: #888; border-bottom: 3px solid transparent; margin-bottom: -1px; cursor: pointer; }
+.st-tab:hover { color: #444; }
+.st-tab.active { color: #222; border-bottom-color: var(--tabc); }
+.st-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; }
+.st-card { border: 1px solid #ececec; border-radius: 6px; padding: 6px 9px 7px; background: #fcfcfc; min-width: 0; }
+.st-card-title { font-size: 10.5px; font-weight: 700; color: #666; text-transform: uppercase;
+                 letter-spacing: 0.4px; margin-bottom: 4px; }
+.st-divider { border-top: 1px dashed #e3e3e3; margin: 6px 0 5px; }
+.st-card-note { font-size: 10.5px; color: #999; font-style: italic; margin: -2px 0 5px; }
+.st-empty { font-size: 11px; color: #aaa; padding: 4px 0; }
+.st-row { display: grid; grid-template-columns: 42% 1fr 32px; align-items: center; gap: 6px; padding: 1px 0; line-height: 1.25; }
+.st-lab { font-size: 11px; color: #555; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.st-v { font-size: 10.5px; color: #333; font-weight: 600; text-align: right; }
+.st-track { position: relative; display: flex; flex-direction: column; gap: 2px; }
+.st-bar { height: 6px; border-radius: 2px; min-width: 0; }
+.st-ref { background: #333333; }
+.st-sel { background: #2C7FB8; }
+.st-aus { position: absolute; top: -2px; bottom: -2px; width: 2px; margin-left: -1px; background: #E07B39; }
+.st-ptrack { position: relative; height: 10px; border-radius: 5px; background: linear-gradient(90deg, #f1f4f7, #d6dee7); }
+.st-pmid { position: absolute; left: 50%; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: #E07B39; }
+.st-dot { position: absolute; top: 50%; width: 10px; height: 10px; margin: -5px 0 0 -5px;
+          border-radius: 50%; border: 1.5px solid #fff; box-shadow: 0 0 0 0.5px rgba(0,0,0,0.25); }
+.st-axis { display: grid; grid-template-columns: 42% 1fr 32px; gap: 6px; font-size: 9.5px; color: #aaa; margin-top: 2px; }
+.st-axis span:nth-child(2) { text-align: center; }
+.st-svg { width: 100%; height: auto; display: block; }
+.st-svgt { font-size: 9px; fill: #999; }
+.st-row-nov { grid-template-columns: 38% 1fr; }
+.st-axis-nov { grid-template-columns: 38% 1fr; }
+.st-grid-wide { grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 10px; }
+.st-compare-intro { font-size: 11px; color: #888; margin-bottom: 6px; }
+.st-compare-key { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+                  gap: 6px 16px; margin-bottom: 10px; }
+.st-compare-name { display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 600; color: #222; }
+.st-compare-name .st-sw { margin-right: 0; }
+.st-compare-sentence { font-size: 11.5px; line-height: 1.4; color: #555; margin: 2px 0 0 16px; }
 ")),
   tags$script(HTML("
     // Update the Filters dropdown button label with the active count
@@ -1074,6 +1726,27 @@ ui <- function(request) fluidPage(
     $(document).on('click', '.leaflet-popup-close-button', function() {
       Shiny.setInputValue('__popup_x_close', Math.random(), {priority:'event'});
     });
+
+    // Suburb profile tabs. The chosen tab is remembered across re-renders
+    // and applied to every profile panel on the page (side panel and each
+    // list card), so switching suburbs or scrolling the list keeps the same
+    // theme in view.
+    window.stTab = window.stTab || 'people';
+    function stApplyTabs() {
+      $('.st-panel').each(function() {
+        var p = $(this);
+        if (!p.find('.st-tab[data-tab=\"' + window.stTab + '\"]').length) return;
+        p.find('.st-tab').removeClass('active')
+         .filter('[data-tab=\"' + window.stTab + '\"]').addClass('active');
+        p.find('.st-pane').hide()
+         .filter('[data-tab=\"' + window.stTab + '\"]').show();
+      });
+    }
+    $(document).on('click', '.st-tab', function() {
+      window.stTab = $(this).data('tab');
+      stApplyTabs();
+    });
+    $(document).on('shiny:value', function() { setTimeout(stApplyTabs, 50); });
   "))
   ),
   # --- Header Layout Block ---
@@ -1281,8 +1954,9 @@ ui <- function(request) fluidPage(
                         "overflow: visible;"),
           uiOutput("top10"))
       ),
-      # ----- Side panel: suburb info, fixed 360px width -----
-      div(style = "flex: 0 0 360px; max-height: 680px; overflow-y: auto;
+      # ----- Side panel: suburb profile (sentence + charts), 580px so the
+      # chart grid fits two columns -----
+      div(style = "flex: 0 0 580px; max-height: 680px; overflow-y: auto;
                    border: 1px solid #e0e0e0; border-radius: 6px;
                    padding: 8px 10px; background: white;",
         uiOutput("map_side_panel"))
@@ -3031,18 +3705,15 @@ server <- function(input, output, session) {
         # Comparison strip: match's headline archetypes, ticked when they
         # equal the reference suburb's (data: suburb_info summaries)
         build_comparison_strip(ref_info_row, get_info(code)),
-        # Body: scoring chart (left) + inline info (right). The mini-map has
+        # Body: scoring chart (left) + suburb profile (right). The mini-map has
         # been retired; clicking "Show on map" opens a leaflet popup that
         # shows the suburb in regional context.
         tags$div(style = "display: flex; gap: 12px; align-items: flex-start;",
           tags$div(style = "flex: 2 1 0; min-width: 0;",
                    list_chart_svg(raw_vals, r$match)),
-          tags$div(style = "flex: 4 1 0; min-width: 0;",
-                   build_info_panel(code, ref_code = active_ref_codes(),
-                                    show_header = FALSE,
-                                    groups = c("Place", "People", "Diversity",
-                                               "Housing", "Socioeconomic",
-                                               "Work")))
+          tags$div(style = "flex: 5 1 0; min-width: 0;",
+                   build_profile_panel(code, ref_codes = active_ref_codes(),
+                                       show_header = FALSE, show_hint = FALSE))
         )
       )
     })
@@ -3156,7 +3827,7 @@ server <- function(input, output, session) {
       return(tags$div(style = "padding: 12px; color: #888; font-size: 13px;",
         "Click any suburb on the map to see its details here."))
     }
-    build_info_panel(code, ref_code = active_ref_codes(), show_header = TRUE)
+    build_profile_panel(code, ref_codes = active_ref_codes(), show_header = TRUE)
   })
 
   # --- Click on empty map: find suburb, show popup with "set as reference"
@@ -3376,13 +4047,10 @@ server <- function(input, output, session) {
                               compare_data(), names(setts)))
       },
 
-      tags$div(style = "display:flex; gap:10px; overflow-x:auto;
-                        padding-bottom:10px;",
-        lapply(c(ref_codes, other_codes), function(code) {
-          tags$div(style = "flex:0 0 260px;",
-                   build_info_panel(code, ref_code = ref_codes,
-                                    show_header = TRUE, collapsible = TRUE))
-        }))
+      # All picked suburbs drawn together in the same charts (references
+      # in greys, compared suburbs in colours), with each suburb's summary
+      # sentence in the key above the charts.
+      build_compare_charts(ref_codes, other_codes)
     )
   })
 }
