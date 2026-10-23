@@ -740,7 +740,7 @@ st_empty_rows <- tibble(sub = character(), category = character(),
 # The displayed suburb is drawn as the blue "selected" series unless it is
 # the only reference, in which case the charts show reference vs Australia.
 build_profile_panel <- function(code, ref_codes, show_header = TRUE,
-                                show_hint = TRUE) {
+                                show_hint = TRUE, anchor_text = NULL) {
   ref_codes <- unique(ref_codes[!is.na(ref_codes)])
   name   <- suburb_code_to_name[[code]] %||% code
   abbr   <- suburb_code_to_abbr[[code]] %||% ""
@@ -768,6 +768,7 @@ build_profile_panel <- function(code, ref_codes, show_header = TRUE,
       tags$span(class = "st-name", sel_label),
       if (is_ref) tags$span(class = "st-badge", "Reference suburb")
       else tags$span(class = "st-badge st-badge-sel", "Selected"),
+      if (!is.null(anchor_text)) tags$span(class = "anchor-note", anchor_text),
       if (show_hint) tags$span(class = "st-hint",
                                "click any suburb on the map to update"))
   }
@@ -849,6 +850,95 @@ build_compare_charts <- function(ref_codes, other_codes) {
              "Hover over a bar, dot or line for exact values."),
     key,
     st_tabs_html(card_fn, grid_class = "st-grid st-grid-wide"))
+}
+
+# ===== Anchor: "near a place" =============================================
+# Optional location preference. Users pick up to 3 anchor suburbs and a
+# radius; each candidate's similarity is multiplied by a proximity factor:
+#   prox  = 0.5 ^ ((distance_km / radius_km) ^ 2)   1 at the anchor, 0.5 at
+#                                                   the radius, ~0.06 at 2x
+#   score = similarity * prox ^ beta                beta = strength setting
+# Results are ranked by score, but the match % shown everywhere stays pure
+# similarity, with the straight-line distance shown next to it. With several
+# anchors, "near any" uses the best proximity and "near all" multiplies them.
+# Off unless the user opens "near a place" and picks a suburb; hidden in
+# dream-suburb mode.
+
+anchor_radius_choices   <- c("10 km" = "10", "20 km" = "20",
+                             "40 km" = "40", "80 km" = "80")
+anchor_strength_choices <- c("A little" = "little", "Normal" = "normal",
+                             "Strong" = "strong")
+anchor_strength_beta    <- c(little = 0.5, normal = 1, strong = 2)
+anchor_max              <- 3
+anchor_colour           <- "#D6336C"
+
+# Any suburb can be an anchor, including low-population ones (a workplace
+# suburb such as a CBD or industrial area may have few residents).
+anchor_choices <- ref |>
+  filter(suburb_code_2021 %in% names(suburb_centroid_lat)) |>
+  mutate(grp = state_abbr[state_name_2021]) |>
+  arrange(grp, display_name) |>
+  split(~ grp) |>
+  map(~ setNames(.x$suburb_code_2021, .x$display_name))
+
+haversine_km <- function(lat1, lng1, lat2, lng2) {
+  rad  <- pi / 180
+  dlat <- (lat2 - lat1) * rad
+  dlng <- (lng2 - lng1) * rad
+  a <- sin(dlat / 2)^2 + cos(lat1 * rad) * cos(lat2 * rad) * sin(dlng / 2)^2
+  6371 * 2 * asin(pmin(1, sqrt(a)))
+}
+
+# Straight-line km from each of `codes` (rows) to each anchor (columns),
+# centroid to centroid.
+anchor_dist_matrix <- function(codes, anchor_codes) {
+  lat <- unname(suburb_centroid_lat[codes])
+  lng <- unname(suburb_centroid_lng[codes])
+  m <- vapply(anchor_codes, function(a)
+         haversine_km(lat, lng, suburb_centroid_lat[[a]], suburb_centroid_lng[[a]]),
+       numeric(length(codes)))
+  m <- matrix(m, nrow = length(codes))
+  colnames(m) <- anchor_codes
+  m
+}
+
+# Adds anchor_km (nearest anchor), proximity and score columns. With no
+# anchor, score = match so the ranking is unchanged.
+apply_anchor <- function(df, anchor) {
+  if (is.null(df)) return(df)
+  if (is.null(anchor) || !nrow(df)) {
+    df$anchor_km <- rep(NA_real_, nrow(df))
+    df$proximity <- rep(NA_real_, nrow(df))
+    df$score     <- df$match
+    return(df)
+  }
+  d <- anchor_dist_matrix(df$suburb_b, anchor$codes)
+  p <- 0.5 ^ ((d / anchor$radius)^2)
+  prox <- if (identical(anchor$mode, "all")) apply(p, 1, prod) else apply(p, 1, max)
+  df$anchor_km <- apply(d, 1, min)
+  df$proximity <- coalesce(prox, 0)
+  df$score     <- df$match * df$proximity ^ anchor$beta
+  df
+}
+
+fmt_km <- function(x) {
+  ifelse(is.na(x), "–",
+         ifelse(x < 10, sprintf("%.1f km", x), sprintf("%.0f km", x)))
+}
+
+anchor_name <- function(code) {
+  nm <- suburb_code_to_name[[code]] %||% code
+  sub("\\s*\\([^)]*\\)\\s*$", "", nm)   # drop "(Vic.)"-style suffixes
+}
+
+# "6.2 km from Kew · 11 km from Carlton". NULL when no anchor is active.
+anchor_note <- function(code, anchor, straight_line = FALSE) {
+  if (is.null(anchor) || is.null(code)) return(NULL)
+  if (code %in% anchor$codes) return("Location anchor")
+  d <- anchor_dist_matrix(code, anchor$codes)[1, ]
+  parts <- paste(fmt_km(d), "from", vapply(anchor$codes, anchor_name, ""))
+  paste0(paste(parts, collapse = " · "),
+         if (straight_line) " (straight line)" else "")
 }
 
 # ===== Helpers ============================================================
@@ -1073,7 +1163,8 @@ format_why_sentence <- function(raw_vals) {
 # It identifies which reference produced this match. Pass NULL for
 # single-reference mode (no annotation rendered).
 build_popup <- function(name, abbr, match, rank, national_rank, national_pct,
-                        raw_vals, code, winning_ref_label = NULL) {
+                        raw_vals, code, winning_ref_label = NULL,
+                        anchor_text = NULL) {
   ord       <- order(unlist(raw_vals), decreasing = TRUE)
   dims_ord  <- names(raw_vals)[ord]
   vals_ord  <- unlist(raw_vals)[ord]
@@ -1098,11 +1189,15 @@ build_popup <- function(name, abbr, match, rank, national_rank, national_pct,
     sprintf("<div style='color:#1f77b4;font-size:11px;margin-top:2px;'>most similar to %s</div>",
             winning_ref_label)
   } else ""
+  anchor_html <- if (!is.null(anchor_text)) {
+    sprintf("<div style='color:%s;font-size:11px;margin-top:2px;'>&#9679; %s</div>",
+            anchor_colour, htmltools::htmlEscape(anchor_text))
+  } else ""
   rea_url <- build_realestate_url(name, abbr)
   sprintf(
     "<b>%s, %s</b><br>Match %s &middot; rank %d here
      <div style='color:#555;font-size:11px;margin-top:2px;'>rank %d nationally &middot; %s</div>
-     %s
+     %s%s
      %s
      <hr style='margin:4px 0;'>%s
      <div style='margin-top:6px;'>
@@ -1115,7 +1210,7 @@ build_popup <- function(name, abbr, match, rank, national_rank, national_pct,
        <a href='%s' target='_blank' rel='noopener noreferrer'>&#8594; View homes for sale</a>
      </div>",
     name, abbr, scales::percent(match, .1), rank, national_rank, fmt_pct(national_pct),
-    winning_html, why_html, bars, code, code, rea_url)
+    anchor_html, winning_html, why_html, bars, code, code, rea_url)
 }
 
 # Popup for clicked suburbs not in current map results (but allowed).
@@ -1331,7 +1426,8 @@ build_info_panel <- function(code, ref_code = NULL, show_header = TRUE,
 # a labelled anchor column with no score (matching yourself is meaningless);
 # compared suburbs show their actual computed match, sourced from
 # `compare_df` (the output of the compare_data() reactive).
-build_compare_table <- function(ref_codes, other_codes, compare_df, selected_dims) {
+build_compare_table <- function(ref_codes, other_codes, compare_df, selected_dims,
+                                anchor = NULL) {
   all_codes <- c(ref_codes, other_codes)
   n_cols    <- length(all_codes)
   if (n_cols == 0) return(NULL)
@@ -1390,6 +1486,19 @@ build_compare_table <- function(ref_codes, other_codes, compare_df, selected_dim
       else tags$b(sprintf("%.1f%%", r$match * 100))
     },
     extra_style = "font-size:12px;")
+
+  # Distance to the main search's location anchor(s), when one is set.
+  # Left blank for the reference columns.
+  anchor_row <- if (!is.null(anchor)) row_of(
+    tags$span(style = sprintf("color:%s;", anchor_colour),
+              sprintf("Distance to %s",
+                      paste(vapply(anchor$codes, anchor_name, ""), collapse = " / "))),
+    function(code, is_ref) {
+      if (is_ref) return(tags$span(style = "color:#aaa;", "\u2014"))
+      if (code %in% anchor$codes) return(tags$span(style = "color:#555;", "anchor"))
+      d <- anchor_dist_matrix(code, anchor$codes)[1, ]
+      tags$span(style = "color:#555;", paste(fmt_km(d), collapse = " / "))
+    }) else NULL
 
   # One block per theme: a toggleable header row + hidden detail rows.
   theme_blocks <- lapply(names(dream_theme_dims), function(theme_id) {
@@ -1456,7 +1565,7 @@ build_compare_table <- function(ref_codes, other_codes, compare_df, selected_dim
   })
 
   tags$div(style = grid_style,
-    header_row, overall_row, theme_blocks)
+    header_row, overall_row, anchor_row, theme_blocks)
 }
 
 # Compact comparison strip for list cards: the match's headline archetypes,
@@ -1650,6 +1759,18 @@ ui <- function(request) fluidPage(
   }
 }
 
+/* ===== near-a-place anchor control ===== */
+.anchor-add { font-size: 13px; color: #2c7fb8; text-decoration: none; white-space: nowrap;
+              border-bottom: 1px dashed #2c7fb8; margin-left: 6px; }
+.anchor-add:hover { color: #1a5a8a; border-bottom-color: #1a5a8a; }
+.anchor-block { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap;
+                margin-left: 4px; padding: 3px 8px; border-radius: 6px;
+                background: #fdf2f6; border: 1px solid #f3c7d6; }
+.anchor-block .form-group { margin-bottom: 0; }
+.anchor-x { font-size: 18px; line-height: 1; color: #888; text-decoration: none; padding: 0 2px; }
+.anchor-x:hover { color: #333; }
+.anchor-note { font-size: 11px; color: #D6336C; white-space: nowrap; }
+
 /* ===== Suburb profile panel (sentence + charts) ===== */
 .st-panel { font-size: 12px; color: #333; }
 .st-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
@@ -1731,6 +1852,21 @@ ui <- function(request) fluidPage(
     // and applied to every profile panel on the page (side panel and each
     // list card), so switching suburbs or scrolling the list keeps the same
     // theme in view.
+
+    // Near-a-place: open / close the anchor controls. Opening ticks the
+    // hidden anchor_on checkbox (so conditionalPanels and bookmarking see
+    // it) and pops the suburb picker open; closing also clears the picks.
+    function stAnchorOpen() {
+      $('#anchor_on').prop('checked', true).trigger('change');
+      setTimeout(function() {
+        var el = document.querySelector('#anchor_sub');
+        try { if (el && el.open) el.open(); } catch (e) {}
+      }, 200);
+    }
+    function stAnchorClose() {
+      $('#anchor_on').prop('checked', false).trigger('change');
+      Shiny.setInputValue('anchor_clear', Math.random(), {priority: 'event'});
+    }
     window.stTab = window.stTab || 'people';
     function stApplyTabs() {
       $('.st-panel').each(function() {
@@ -1908,7 +2044,55 @@ ui <- function(request) fluidPage(
             )
           ),
           tags$span(textOutput("region_summary", inline = TRUE),
-                    style = "font-size:13px; color:#444; margin-left:4px;")
+                    style = "font-size:13px; color:#444; margin-left:4px;"),
+          # Optional location preference ("near a place"). Off by default:
+          # only the link shows until the user opens it. anchor_on is a
+          # hidden checkbox so it survives bookmarking like any input.
+          conditionalPanel("!output.dream_on", inline = TRUE,
+            tags$span(style = "display:none;",
+                      checkboxInput("anchor_on", NULL, FALSE)),
+            conditionalPanel("!input.anchor_on", inline = TRUE,
+              tags$a(href = "#", class = "anchor-add",
+                     onclick = "stAnchorOpen(); return false;",
+                     title = "Favour suburbs close to a suburb you choose",
+                     icon("location-dot"), " near a place")),
+            conditionalPanel("input.anchor_on", inline = TRUE,
+              tags$span(class = "anchor-block",
+                tags$span("near", style = "font-size:14px;"),
+                div(style = "min-width:200px; max-width:380px;",
+                    virtualSelectInput("anchor_sub", NULL,
+                                       choices = anchor_choices,
+                                       selected = character(0),
+                                       multiple = TRUE, maxValues = anchor_max,
+                                       width = "100%", search = TRUE,
+                                       placeholder = "Pick up to 3 suburbs\u2026",
+                                       optionsCount = 8, showValueAsTags = TRUE,
+                                       autoSelectFirstOption = FALSE,
+                                       disableOptionGroupCheckbox = TRUE)),
+                tags$span("within", style = "font-size:14px;"),
+                div(style = "width:96px;",
+                    selectInput("anchor_radius", NULL,
+                                choices = anchor_radius_choices,
+                                selected = "20", width = "100%")),
+                dropdownButton(
+                  inputId = "anchor_dd", label = NULL, icon = icon("gear"),
+                  status = "default", circle = FALSE, right = TRUE,
+                  width = "280px",
+                  div(style = "padding: 6px;",
+                    radioButtons("anchor_strength", "How much location matters",
+                                 choices = anchor_strength_choices,
+                                 selected = "normal"),
+                    radioButtons("anchor_mode",
+                                 "With several places, favour suburbs near",
+                                 choices = c("Any of them" = "any",
+                                             "All of them" = "all"),
+                                 selected = "any"),
+                    tags$div(style = "font-size:11px; color:#777;",
+                      "Distances are straight-line, between suburb centres. ",
+                      "The match % stays pure similarity; the ranking also ",
+                      "rewards being close."))),
+                tags$a(href = "#", class = "anchor-x", title = "Remove location",
+                       onclick = "stAnchorClose(); return false;", "\u00d7"))))
         ),
         # Right-aligned Map/List toggle
         tags$div(
@@ -2071,6 +2255,47 @@ server <- function(input, output, session) {
     if (!is.null(dream)) unique(unlist(dream$theme_refs)) else current_ref()
   })
 
+  # --- "near a place" anchor -------------------------------------------
+  output$dream_on <- reactive({ !is.null(dream_refs_active()) })
+  outputOptions(output, "dream_on", suspendWhenHidden = FALSE)
+
+  # NULL unless the control is open, at least one suburb is picked and
+  # dream mode is off.
+  anchor_state <- reactive({
+    if (!isTRUE(input$anchor_on) || !is.null(dream_refs_active())) return(NULL)
+    codes <- head(input$anchor_sub %||% character(0), anchor_max)
+    codes <- codes[codes %in% names(suburb_centroid_lat)]
+    if (!length(codes)) return(NULL)
+    list(codes  = codes,
+         radius = as.numeric(input$anchor_radius %||% "20"),
+         beta   = unname(anchor_strength_beta[input$anchor_strength %||% "normal"]),
+         mode   = input$anchor_mode %||% "any")
+  })
+
+  observeEvent(input$anchor_clear, {
+    updateVirtualSelect(session = session, inputId = "anchor_sub",
+                        selected = character(0))
+  })
+
+  # Anchor pin(s) and radius ring on the map.
+  observeEvent(anchor_state(), {
+    a <- anchor_state()
+    proxy <- leafletProxy("map") |> clearGroup("anchor")
+    if (is.null(a)) return()
+    lat <- unname(suburb_centroid_lat[a$codes])
+    lng <- unname(suburb_centroid_lng[a$codes])
+    nms <- vapply(a$codes, anchor_name, "")
+    proxy |>
+      addCircles(lng = lng, lat = lat, radius = a$radius * 1000,
+                 group = "anchor", color = anchor_colour, weight = 2,
+                 opacity = 0.9, dashArray = "6,5", fill = FALSE,
+                 options = pathOptions(interactive = FALSE)) |>
+      addCircleMarkers(lng = lng, lat = lat, group = "anchor", radius = 7,
+                       color = "white", weight = 2, fillColor = anchor_colour,
+                       fillOpacity = 1,
+                       label = sprintf("%s (location, %g km radius)", nms, a$radius))
+  }, ignoreNULL = FALSE)
+
   # Update the Filters button label whenever any cat filter changes
   observe({
     n <- sum(
@@ -2123,18 +2348,23 @@ server <- function(input, output, session) {
       # reference produced the surfaced match (for single-ref runs it's
       # the only ref; for multi-ref MAX it's the best-fit ref; for multi-ref
       # MEAN it's the ref with the strongest individual fit).
+      anchor <- anchor_state()
       top <- head(cd, n_top) |>
         mutate(
           `reference suburb`       = vapply(winning_ref, label, character(1)),
           `most similar suburb`    = vapply(suburb_b,    label, character(1)),
           most_similar_suburb_code = suburb_b,
-          match                = round(match, 4)
+          match                = round(match, 4),
+          distance_km          = round(anchor_km, 1),
+          proximity            = round(proximity, 4),
+          ranking_score        = round(score, 4)
         ) |>
         mutate(across(all_of(raw_cols), \(x) round(x, 4))) |>
         rename_with(\(nm) paste0("sim_", sub("^raw_", "", nm)),
                     all_of(raw_cols)) |>
         select(`reference suburb`, `most similar suburb`,
                most_similar_suburb_code, rank, match,
+               if (!is.null(anchor)) c("distance_km", "proximity", "ranking_score"),
                all_of(paste0("sim_", raw_clean)))
 
       # Reference rows: one per reference suburb, against itself.
@@ -2209,7 +2439,15 @@ server <- function(input, output, session) {
         if (length(cat_terrain_filter()))
           sprintf("# Terrain filter: %s", paste(cat_terrain_filter(), collapse = "; ")) else NULL,
         if (length(cat_remote_filter()))
-          sprintf("# Remoteness filter: %s", paste(cat_remote_filter(), collapse = "; ")) else NULL
+          sprintf("# Remoteness filter: %s", paste(cat_remote_filter(), collapse = "; ")) else NULL,
+        if (!is.null(anchor)) c(
+          sprintf("# Location anchor(s): %s",
+                  paste(vapply(anchor$codes, label, character(1)), collapse = "; ")),
+          sprintf("# Anchor radius: %g km; strength: beta = %g; multiple anchors: %s",
+                  anchor$radius, anchor$beta,
+                  if (anchor$mode == "all") "near all" else "near any"),
+          "# Ranking: ranking_score = match x proximity^beta, proximity = 0.5^((distance_km / radius)^2)"
+        ) else NULL
       )
       settings_lines <- Filter(Negate(is.null), settings_lines)
 
@@ -2261,6 +2499,8 @@ server <- function(input, output, session) {
     # After UI is rebuilt, sync inputs back to match the restored state
     # (some widgets need an explicit update to display the right value).
     updateVirtualSelect(session, "ref_sub", selected = current_ref())
+    if (length(state$input$anchor_sub))
+      updateVirtualSelect(session, "anchor_sub", selected = state$input$anchor_sub)
     updateNumericInput(session, "top_n_input_inline", value = top_n_active())
     updatePickerInput(session, "cat_coast_pick",   selected = cat_coast_filter())
     updatePickerInput(session, "cat_terrain_pick", selected = cat_terrain_filter())
@@ -2420,6 +2660,7 @@ server <- function(input, output, session) {
       df <- compute_match(raw_wide, setts, NULL)
       if (is.null(df) || nrow(df) == 0) return(NULL)
       df$winning_ref <- "dream"
+      df <- apply_anchor(df, NULL)   # adds score = match (anchor is off here)
 
       # Exclude all dream references from results
       dream_refs <- unique(unlist(dream$theme_refs))
@@ -2427,7 +2668,7 @@ server <- function(input, output, session) {
       df_national <- df |>
         filter(!suburb_b %in% dream_refs,
                suburb_b %in% allowed_codes_all) |>
-        arrange(desc(match)) |>
+        arrange(desc(score), desc(match)) |>
         mutate(national_rank = row_number(),
                national_pct  = 100 * national_rank / n())
 
@@ -2451,7 +2692,8 @@ server <- function(input, output, session) {
 
       return(df_national |>
         filter(suburb_b %in% keep_codes) |>
-        arrange(desc(match)) |>
+        mutate(sim_rank = rank(-match, ties.method = "first")) |>
+        arrange(desc(score), desc(match)) |>
         mutate(rank = row_number()) |>
         as_tibble())
     }
@@ -2502,11 +2744,15 @@ server <- function(input, output, session) {
         filter(!is.nan(match))
     }
 
+    # Location anchor: ranking score = match x proximity^beta (score = match
+    # when no anchor is set). The displayed match stays pure similarity.
+    combined <- apply_anchor(combined, anchor_state())
+
     # National pass: exclude all selected references, keep allowed only
     df_national <- combined |>
       filter(!suburb_b %in% ref_codes,
              suburb_b %in% allowed_codes_all) |>
-      arrange(desc(match)) |>
+      arrange(desc(score), desc(match)) |>
       mutate(national_rank = row_number(),
              national_pct  = 100 * national_rank / n())
 
@@ -2518,9 +2764,12 @@ server <- function(input, output, session) {
       remote     = cat_remote_filter()
     )
 
+    # sim_rank = position on similarity alone, so list cards can say when
+    # the anchor moved a suburb.
     df_national |>
       filter(suburb_b %in% filtered_codes) |>
-      arrange(desc(match)) |>
+      mutate(sim_rank = rank(-match, ties.method = "first")) |>
+      arrange(desc(score), desc(match)) |>
       mutate(rank = row_number()) |>
       as_tibble()
   })
@@ -2986,6 +3235,14 @@ server <- function(input, output, session) {
              "of your references (best individual fit per pair). ",
              tags$b("Balanced across all"), " surfaces suburbs moderately similar ",
              "to every reference (mean across pairs)."),
+      tags$h5("Near a place"),
+      tags$p("Optionally, pick up to 3 suburbs to stay close to (\u201cnear a place\u201d). ",
+             "Each result's similarity is multiplied by a proximity factor that is 1 at ",
+             "the place, 0.5 at the chosen radius and close to 0 at twice the radius, ",
+             "raised to a strength setting (a little / normal / strong). Results are ",
+             "ranked by that combined score, but the match % shown stays pure ",
+             "similarity, with the straight-line distance between suburb centres ",
+             "shown alongside."),
       tags$h5("Filters"),
       tags$p("Category filters (Coast, Terrain, Remoteness) restrict results to ",
              "the selected categories AND remove that characteristic from the match. ",
@@ -3078,7 +3335,8 @@ server <- function(input, output, session) {
 
     raw_cols   <- grep("^raw_",   names(d), value = TRUE)
     join_cols  <- c("suburb_b", "match", "rank", "national_rank",
-                    "national_pct", "winning_ref", raw_cols)
+                    "national_pct", "winning_ref", "anchor_km", raw_cols)
+    anchor     <- anchor_state()
     # Popup breakdown charts should only show dims currently switched on
     # in Match Settings, not every dim the underlying data happens to
     # carry (which includes ones the user has turned off).
@@ -3126,7 +3384,8 @@ server <- function(input, output, session) {
                   shp_sub$match[i], shp_sub$rank[i],
                   shp_sub$national_rank[i], shp_sub$national_pct[i],
                   raw_vals, code,
-                  winning_ref_label = winning_lbl)
+                  winning_ref_label = winning_lbl,
+                  anchor_text = anchor_note(code, anchor, straight_line = TRUE))
     }, character(1))
 
     # Rank-based Blues palette: rank 1 = darkest blue, rank N = lightest.
@@ -3160,8 +3419,9 @@ server <- function(input, output, session) {
         fillColor = ~pal_fn(rank), fillOpacity = 0.65,
         color = "#4d4d4d", weight = 2,
         label = ~lapply(
-          sprintf("%s: rank %d (match %.1f%%)<br><i>Click for more info</i>",
-                  suburb_name_2021, rank, match * 100),
+          sprintf("%s: rank %d (match %.1f%%%s)<br><i>Click for more info</i>",
+                  suburb_name_2021, rank, match * 100,
+                  if (is.null(anchor)) "" else paste0(" \u00b7 ", fmt_km(anchor_km))),
           htmltools::HTML),
         popup = ~popup_html,
         popupOptions = popupOptions(minWidth = 260, maxWidth = 300),
@@ -3458,6 +3718,7 @@ server <- function(input, output, session) {
     max_v <- max(top$match, na.rm = TRUE)
     if (!is.finite(max_v) || max_v <= 0) max_v <- 1
 
+    has_anchor <- !is.null(anchor_state())
     render_row <- function(i) {
       r <- as.data.frame(top)[i, , drop = FALSE]
       match_pct <- r$match * 100
@@ -3473,7 +3734,9 @@ server <- function(input, output, session) {
       tags$div(
         class = "top10-row",
         style = paste(
-          "display:grid; grid-template-columns: 26px 118px 1fr 44px 22px;",
+          if (has_anchor)
+            "display:grid; grid-template-columns: 26px 118px 1fr 40px 44px 22px;"
+          else "display:grid; grid-template-columns: 26px 118px 1fr 44px 22px;",
           "gap:6px; align-items:center; padding:3px 4px; border-radius:3px;"),
         tags$span(style = "font-size:10px; font-weight:bold; color:#666;",
                   sprintf("#%d", r$rank)),
@@ -3493,6 +3756,11 @@ server <- function(input, output, session) {
             bar_width_pct))),
         tags$span(style = "font-size:10px; text-align:right; color:#333;",
                   sprintf("%.1f%%", match_pct)),
+        if (has_anchor)
+          tags$span(style = sprintf("font-size:10px; text-align:right; color:%s;",
+                                    anchor_colour),
+                    title = "Straight-line distance to the nearest location anchor",
+                    fmt_km(r$anchor_km)),
         tags$a(href = rea_url, target = "_blank", rel = "noopener noreferrer",
                title = "View homes for sale on realestate.com.au",
                style = "color:#888; text-align:center;",
@@ -3611,6 +3879,7 @@ server <- function(input, output, session) {
     if (!nrow(top)) return(NULL)
 
     raw_cols <- grep("^raw_", names(top), value = TRUE)
+    list_anchor <- anchor_state()
 
     dream           <- dream_refs_active()
     multi_ref       <- is.null(dream) && length(current_ref()) > 1
@@ -3673,6 +3942,12 @@ server <- function(input, output, session) {
                     sprintf("%s, %s", name, abbr)),
           tags$span(style = "font-size: 15px; color: #1f77b4; font-weight: 600;",
                     sprintf("%.0f%%", r$match * 100)),
+          if (!is.null(list_anchor)) tags$span(class = "anchor-note",
+            title = "Straight-line distance between suburb centres",
+            anchor_note(code, list_anchor),
+            if (isTRUE(r$sim_rank != r$rank))
+              tags$span(style = "color:#999;",
+                        sprintf(" (#%d on similarity alone)", r$sim_rank))),
           tags$span(style = "font-size: 11px; color: #888;",
                     sprintf("nat. rank %d · %s",
                             r$national_rank, fmt_pct(r$national_pct))),
@@ -3827,7 +4102,8 @@ server <- function(input, output, session) {
       return(tags$div(style = "padding: 12px; color: #888; font-size: 13px;",
         "Click any suburb on the map to see its details here."))
     }
-    build_profile_panel(code, ref_codes = active_ref_codes(), show_header = TRUE)
+    build_profile_panel(code, ref_codes = active_ref_codes(), show_header = TRUE,
+                        anchor_text = anchor_note(code, anchor_state()))
   })
 
   # --- Click on empty map: find suburb, show popup with "set as reference"
@@ -3890,7 +4166,8 @@ server <- function(input, output, session) {
       } else NULL
       build_popup(nm, abbr, row$match, row$rank,
                   row$national_rank, row$national_pct, vals, code,
-                  winning_ref_label = win_label)
+                  winning_ref_label = win_label,
+                  anchor_text = anchor_note(code, anchor_state(), straight_line = TRUE))
     } else build_popup_unranked(nm, abbr, code)
 
     leafletProxy("map") |>
@@ -3930,7 +4207,8 @@ server <- function(input, output, session) {
       } else NULL
       build_popup(nm, abbr, row$match, row$rank,
                   row$national_rank, row$national_pct, vals, code,
-                  winning_ref_label = win_label)
+                  winning_ref_label = win_label,
+                  anchor_text = anchor_note(code, anchor_state(), straight_line = TRUE))
     } else build_popup_unranked(nm, abbr, code)
 
     leafletProxy("map") |>
@@ -4044,7 +4322,8 @@ server <- function(input, output, session) {
       } else {
         tags$div(style = "overflow-x:auto; margin-bottom:20px;",
           build_compare_table(ref_codes, other_codes,
-                              compare_data(), names(setts)))
+                              compare_data(), names(setts),
+                              anchor = anchor_state()))
       },
 
       # All picked suburbs drawn together in the same charts (references
