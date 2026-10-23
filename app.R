@@ -2887,7 +2887,18 @@ server <- function(input, output, session) {
         "is simply left out of the average, ",
         "not treated as 0."),
       tags$hr(style = "margin: 8px 0;"),
-      tags$label("characteristics and how to score them:"),
+      tags$div(style = "display:flex; align-items:center; gap:10px; flex-wrap:wrap;",
+        tags$label(style = "margin:0;", "characteristics and how to score them:"),
+        # Bulk-set every characteristic's target in one click (e.g. "most
+        # different suburbs"). Only the Similar/Different choice changes;
+        # which characteristics are switched on is left as is.
+        tags$span(style = "font-size:12px; color:#666;", "Set all to:",
+          actionButton("set_all_similar", "Similar",
+                       class = "btn-outline-secondary btn-sm",
+                       style = "margin-left:4px; padding:1px 8px;"),
+          actionButton("set_all_different", "Different",
+                       class = "btn-outline-secondary btn-sm",
+                       style = "margin-left:2px; padding:1px 8px;"))),
       div(style = "font-size: 11px; color: #666; margin-bottom: 4px;",
           "Similar = match the reference closely. Mostly similar = somewhat closer than average. ",
           "Mostly different = somewhat further. Different = match as little as possible."),
@@ -2924,6 +2935,15 @@ server <- function(input, output, session) {
     settings_active(new_settings)
     removeModal()
   })
+
+  # "Set all to" buttons in the settings modal. Changes only the radio
+  # choices in the open modal; nothing applies until the user clicks Apply.
+  lapply(c(similar = "set_all_similar", different = "set_all_different"),
+         function(btn) observeEvent(input[[btn]], {
+           target <- if (btn == "set_all_similar") "similar" else "different"
+           for (d in all_dim_codes)
+             updateRadioButtons(session, paste0("dim_target_", d), selected = target)
+         }))
 
   observeEvent(input$reset_settings, {
     for (d in all_dim_codes) {
