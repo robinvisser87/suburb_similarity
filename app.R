@@ -55,10 +55,23 @@ dream_theme_dims <- list(
                 "tertiary", "health", "kinder", "schools")
 )
 dream_theme_labels <- c(
-  people    = "People & culture",
+  people    = "People & diversity",
   urban     = "Urban fabric & economy",
   nature    = "Nature & climate",
   amenities = "Amenities")
+
+# Dream-suburb wording: each theme card completes the sentence
+# "Show 20 suburbs with ... the people & diversity of [suburb]".
+dream_sentence_labels <- c(
+  people    = "the people & diversity of",
+  urban     = "the urban feel of",
+  nature    = "the nature & climate of",
+  amenities = "the amenities of")
+dream_plain_hints <- c(
+  people    = "who lives there: age, families, income, background, voting",
+  urban     = "what it's like to live in: density, housing, jobs",
+  nature    = "the setting: coast, terrain, greenery, weather",
+  amenities = "what's nearby: shops, dining, transport, schools, health")
 
 # Same 4-theme colour chips used in the Match Settings modal, hoisted to
 # top level so the new suburb-comparison table (below) can reuse them too.
@@ -206,6 +219,15 @@ filter_to_dim <- c(cat_coast = "coast", cat_terrain = "terrain",
 # ranked, or used as comparison targets. Low-population suburbs missing
 # census coverage are flagged FALSE.
 allowed_codes_all <- ref |> filter(allowed) |> pull(suburb_code_2021)
+
+# One-click Dream example (only offered if all three suburbs are found).
+dream_example <- local({
+  pick <- function(nm) ref$suburb_code_2021[ref$suburb_name_2021 == nm &
+                                            ref$state_name_2021 == "Victoria" &
+                                            ref$allowed][1]
+  ex <- list(people = pick("Fitzroy"), urban = pick("Kew"), nature = pick("Torquay"))
+  if (any(is.na(unlist(ex)))) NULL else ex
+})
 
 state_lookup_full <- setNames(ref$state_name_2021, ref$suburb_code_2021)
 gcc_lookup_full   <- setNames(ref$gcc_name_2021,   ref$suburb_code_2021)
@@ -387,7 +409,7 @@ profile_ref_data <- function(ref_codes) {
 # chart_data. order: explicit category order, or "desc" (by the reference's
 # value). top_n: show the reference's top N categories.
 profile_tabs <- list(
-  people = list(label = "People & culture",       colour = "#1C8356",
+  people = list(label = "People & diversity",       colour = "#1C8356",
                 charts = c("age", "household", "birth", "education", "lfs",
                            "voting")),
   urban  = list(label = "Urban fabric & economy", colour = "#5A5156",
@@ -1595,7 +1617,7 @@ comparison_fields <- c(
 )
 
 # Which dream theme supplies the reference value for each strip field:
-# age & income are "People & culture", tenure & economy are "Urban fabric".
+# age & income are "People & diversity", tenure & economy are "Urban fabric".
 comparison_field_theme <- c(
   age_archetype    = "people",
   income_archetype = "people",
@@ -1794,10 +1816,14 @@ ui <- function(request) fluidPage(
 .mode-dream .ref-sub-wrap { display: none !important; }
 .dream-row { display: grid; grid-template-columns: repeat(4, minmax(190px, 260px));
              gap: 10px; justify-content: center; margin: 2px 0 8px; }
-.dream-theme { border: 1px solid #e3e3e3; border-radius: 8px; padding: 6px 8px; background: #fcfcfc; min-width: 0; }
-.dream-th { font-size: 10px; font-weight: 700; color: #fff; padding: 2px 8px; border-radius: 9px;
-            letter-spacing: 0.3px; display: inline-block; }
-.dream-hint { font-size: 10.5px; color: #999; margin: 3px 0 4px; line-height: 1.3; }
+.dream-theme { border: 1px solid #e3e3e3; border-top: 3px solid var(--themec); border-radius: 8px;
+               padding: 6px 8px 8px; background: #fcfcfc; min-width: 0; }
+.dream-label { font-size: 13px; font-weight: 600; color: var(--themec); display: flex;
+               align-items: center; gap: 6px; }
+.dream-info { color: #aaa; font-size: 11px; cursor: help; }
+.dream-hint { font-size: 11px; color: #888; margin: 1px 0 5px; line-height: 1.3; }
+.dream-prompt { text-align: center; font-size: 12.5px; color: #666; margin: 0 0 10px; }
+.dream-prompt a { font-weight: 600; }
 .dream-theme .form-group { margin-bottom: 0; }
 @media (max-width: 900px) { .dream-row { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 768px) {
@@ -2040,7 +2066,7 @@ ui <- function(request) fluidPage(
           conditionalPanel("input.app_mode != 'dream'", inline = TRUE,
             tags$span("suburbs similar to", style = "font-size:14px;")),
           conditionalPanel("input.app_mode == 'dream'", inline = TRUE,
-            tags$span("suburbs that combine", style = "font-size:14px;")),
+            tags$span("suburbs with\u2026", style = "font-size:14px;")),
           div(class = "ref-sub-wrap",
               style = "min-width:240px; flex:0 1 auto; max-width:460px;",
               virtualSelectInput("ref_sub", NULL,
@@ -2079,22 +2105,25 @@ ui <- function(request) fluidPage(
   conditionalPanel("input.app_mode == 'dream'",
     tags$div(class = "dream-row",
       lapply(names(dream_theme_dims), function(theme_id) {
+        full_list <- paste(dim_labels[intersect(sort(dream_theme_dims[[theme_id]]),
+                                                names(dim_labels))],
+                           collapse = ", ")
         tags$div(class = "dream-theme",
-          tags$span(class = "dream-th",
-                    style = sprintf("background:%s;", theme_group_colours[[theme_id]]),
-                    toupper(dream_theme_labels[[theme_id]])),
-          tags$div(class = "dream-hint",
-                   paste(dim_labels[intersect(sort(dream_theme_dims[[theme_id]]),
-                                              names(dim_labels))],
-                         collapse = ", ")),
+          style = sprintf("--themec:%s;", theme_group_colours[[theme_id]]),
+          tags$div(class = "dream-label", dream_sentence_labels[[theme_id]],
+            tags$span(class = "dream-info", title = paste("Characteristics:", full_list),
+                      icon("circle-info"))),
+          tags$div(class = "dream-hint", dream_plain_hints[[theme_id]]),
           virtualSelectInput(paste0("dream_", theme_id, "_refs"), NULL,
                              choices = ref_choices, selected = character(0),
                              multiple = TRUE, search = TRUE, width = "100%",
-                             placeholder = "any (leave empty to skip)",
+                             placeholder = "Search for a suburb\u2026",
                              showValueAsTags = TRUE, optionsCount = 10,
                              autoSelectFirstOption = FALSE,
                              disableOptionGroupCheckbox = TRUE))
-      }))),
+      })),
+    # Example link + prompt when nothing is picked yet.
+    uiOutput("dream_prompt")),
 
   # Active-criteria chips: what's currently narrowing or steering the
   # results, each removable, plus "Clear all". Visible whether or not the
@@ -2606,7 +2635,7 @@ server <- function(input, output, session) {
     "map_bounds", "map_center", "map_zoom_event",
     "set_ref", "open_settings", "apply_settings", "reset_settings",
     "open_methodology",
-    "clear_filters_empty", "show_info", "chip_remove", "add_compare",
+    "clear_filters_empty", "show_info", "chip_remove", "add_compare", "dream_example",
     "region_dd", "region_dd_state", "filters_dd"
   ))
 
@@ -3193,17 +3222,29 @@ server <- function(input, output, session) {
     if (!identical(new_val, isolate(dream_refs_active()))) dream_refs_active(new_val)
   })
 
-  # First switch into Dream with every theme empty: start from the current
-  # reference in all four themes (same results as Similar), then the user
-  # swaps out the themes they want to change.
-  observeEvent(input$app_mode, {
-    if (identical(input$app_mode, "dream") && !length(unlist(dream_theme_inputs()))) {
-      for (theme_id in names(dream_theme_dims))
-        updateVirtualSelect(session = session,
-                            inputId = paste0("dream_", theme_id, "_refs"),
-                            selected = current_ref())
-    }
-  }, ignoreInit = TRUE)
+  # Dream starts empty (it's about picking places you like). Under the
+  # cards: a prompt while nothing is picked, plus a one-click example.
+  output$dream_prompt <- renderUI({
+    empty <- !length(unlist(dream_theme_inputs()))
+    example <- if (!is.null(dream_example)) tags$a(
+      href = "#",
+      onclick = "Shiny.setInputValue('dream_example', Math.random(), {priority:'event'}); return false;",
+      sprintf("people like %s \u00b7 urban feel like %s \u00b7 nature like %s",
+              anchor_name(dream_example$people), anchor_name(dream_example$urban),
+              anchor_name(dream_example$nature)))
+    tags$div(class = "dream-prompt",
+      if (empty) tags$span(icon("hand-pointer"),
+        " Pick a suburb you like for one or more themes; leave any blank to ignore it. "),
+      if (!is.null(example)) tagList("Try an example: ", example))
+  })
+
+  observeEvent(input$dream_example, {
+    req(dream_example)
+    for (theme_id in names(dream_theme_dims))
+      updateVirtualSelect(session = session,
+                          inputId = paste0("dream_", theme_id, "_refs"),
+                          selected = dream_example[[theme_id]] %||% character(0))
+  })
 
   observeEvent(input$open_methodology, {
     showModal(modalDialog(
@@ -3856,7 +3897,7 @@ server <- function(input, output, session) {
           "background: #fafafa; text-align: center; font-size: 13px; color: #666;"),
         tags$div(icon("wand-magic-sparkles", class = "fa-2x"),
                  style = "color: #bbb; margin-bottom: 12px;"),
-        "Pick a suburb for at least one theme above to build your dream suburb."))
+        "Pick a suburb you like for at least one theme above, or try the example."))
     }
     if (is.null(d) || nrow(d) == 0) {
       # Build a list of currently active filters for the empty-state card
