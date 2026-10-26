@@ -1778,14 +1778,19 @@ ui <- function(request) fluidPage(
 .refine-count { display: none; background: #2c7fb8; color: #fff; border-radius: 9px;
                 font-size: 11px; font-weight: 600; padding: 0 6px; line-height: 17px; }
 .refine-caret { font-size: 10px; color: #888; }
-.refine-strip { border: 1px solid #e3e8ee; border-radius: 8px; background: #fafbfc;
-                padding: 10px 14px 6px; margin: 2px 0 10px; }
-.refine-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px 22px; }
+.refine-strip { border: 1px solid #dde3ea; border-radius: 8px; background: #eef1f5;
+                padding: 10px 10px 6px; margin: 2px 0 10px; }
+.refine-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; }
+/* Each section is its own white card, so the four groups read as separate
+   even when the grid wraps onto two rows on narrower screens. */
+.refine-col { background: #fff; border: 1px solid #dde3ea; border-top: 3px solid #2c7fb8;
+              border-radius: 6px; padding: 8px 12px 6px; min-width: 0; }
 .refine-h { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px;
-            color: #666; margin-bottom: 4px; }
+            color: #2c5f8a; margin: 0 -12px 8px; padding: 0 12px 6px;
+            border-bottom: 1px solid #edf0f3; }
 .refine-help { font-size: 11px; color: #888; line-height: 1.35; margin-bottom: 6px; }
 .refine-tree { max-height: 230px; overflow-y: auto; border: 1px solid #e6e6e6; border-radius: 6px;
-               background: #fff; padding: 4px; }
+               background: #fafbfc; padding: 4px; }
 .refine-col .form-group { margin-bottom: 8px; }
 .refine-col .control-label { font-size: 12px; font-weight: 600; color: #444; margin-bottom: 2px; }
 .refine-col .shiny-options-group, .refine-col .radio-inline { font-size: 12px; }
