@@ -1001,6 +1001,10 @@ fw_codes <- filter_wide$suburb_code_2021
 fw_population <- unname(setNames(suburb_info$population,
                                  suburb_info$suburb_code_2021)[fw_codes])
 
+# Map results as suburb polygons up to this many; dots beyond that. All
+# ~11,000 detailed polygons at once is slow to draw and pan in the browser.
+crit_polygon_max <- 1000
+
 crit_theme_colour <- c("People & diversity"     = theme_group_colours[["people"]],
                        "Urban fabric & economy" = theme_group_colours[["urban"]],
                        "Nature & climate"       = theme_group_colours[["nature"]])
@@ -1028,15 +1032,19 @@ crit_add_choices <- local({
                   paste(m$subdimension, "(national percentile)"), m$category)
   groups <- split(m, paste(m$theme, "·", m$subdimension))
   groups <- groups[unique(paste(m$theme, "·", m$subdimension))]
-  out <- lapply(groups, function(g) setNames(paste0("m:", g$col_key), g$opt))
+  # Share subdimensions with 3+ categories start with a "categories added
+  # together" option, so the group filter sits next to the categories it uses.
+  out <- lapply(groups, function(g) {
+    single <- setNames(paste0("m:", g$col_key), g$opt)
+    if (g$valtype[1] == "share" && nrow(g) >= 3)
+      c(setNames(paste0("g:", g$subdimension[1]),
+                 paste0("\u2795 Several ", tolower(g$subdimension[1]),
+                        " categories added together")), single)
+    else single
+  })
   out[["Nature & climate · Weather by month"]] <-
     setNames(paste0("w:", names(crit_weather)),
              vapply(crit_weather, `[[`, "", "label"))
-  combinable <- m |> filter(valtype == "share") |> count(subdimension) |>
-    filter(n >= 3) |> pull(subdimension)
-  out[["Combine categories (together ≥ x%)"]] <-
-    setNames(paste0("g:", combinable),
-             paste0(combinable, ": several categories together"))
   out
 })
 
@@ -1931,7 +1939,10 @@ ui <- function(request) fluidPage(
 /* ===== Find by criteria ===== */
 .mode-criteria .ref-sub-wrap, .mode-criteria .top10-panel { display: none !important; }
 .crit-panel { max-width: 1400px; margin: 0 auto 8px; }
-.crit-top { display: flex; gap: 10px; align-items: center; justify-content: center; flex-wrap: wrap; }
+.crit-top { display: flex; gap: 10px; align-items: center; justify-content: center; flex-wrap: wrap;
+            position: relative; z-index: 50; }
+.crit-add .vscomp-dropbox-container { z-index: 1050 !important; }
+.crit-grid { position: relative; z-index: 1; }
 .crit-add { flex: 0 1 560px; min-width: 260px; }
 .crit-top .form-group { margin-bottom: 0; }
 .crit-funnel { text-align: center; font-size: 12.5px; color: #555; margin: 8px 0; }
@@ -1948,6 +1959,9 @@ ui <- function(request) fluidPage(
 .crit-x:hover { color: #333; }
 .crit-card .form-group { margin-bottom: 2px; }
 .crit-quick { font-size: 11px; margin: -2px 0 4px; display: flex; gap: 8px; flex-wrap: wrap; }
+.crit-foot { display: flex; align-items: baseline; gap: 8px; }
+.crit-foot > div { margin-left: auto; }
+.crit-combine { font-size: 11px; text-decoration: none; white-space: nowrap; }
 .crit-pass { font-size: 11px; color: #666; text-align: right; margin-bottom: 3px; }
 .crit-pass b { color: #1a5a8a; }
 .crit-card .irs { margin: 0 7px; }
@@ -2273,7 +2287,7 @@ ui <- function(request) fluidPage(
         tags$div(class = "crit-add",
           virtualSelectInput("crit_add", NULL, choices = crit_add_choices,
                              selected = character(0), search = TRUE,
-                             placeholder = "+ Add a criterion: temperature, rainfall, education, income, vegetation\u2026",
+                             placeholder = "+ Add a criterion: climate, people, housing, vegetation\u2026",
                              width = "100%", optionsCount = 10,
                              autoSelectFirstOption = FALSE,
                              disableOptionGroupCheckbox = TRUE)),
@@ -2802,7 +2816,7 @@ server <- function(input, output, session) {
     "set_ref", "open_settings", "apply_settings", "reset_settings",
     "open_methodology",
     "clear_filters_empty", "show_info", "chip_remove", "add_compare", "dream_example",
-    "crit_add", "crit_add_quick", "crit_remove", "crit_season",
+    "crit_add", "crit_add_quick", "crit_remove", "crit_season", "crit_to_group",
     "region_dd", "region_dd_state", "filters_dd"
   ))
 
@@ -3381,7 +3395,7 @@ server <- function(input, output, session) {
     type <- substr(choice, 1, 1); key <- substring(choice, 3)
     if (type == "m") {
       m <- filter_meta_by_key[[key]]; if (is.null(m)) return(NULL)
-      list(choice = choice, type = "metric", key = key, unit = m$unit,
+      list(choice = choice, type = "metric", key = key, unit = m$unit, sub = m$subdimension,
            title = if (m$valtype == "percentile") m$subdimension else m$category,
            subtitle = if (m$valtype == "percentile") "national percentile (0 = lowest)"
                       else paste(m$subdimension, "· share of the suburb"),
@@ -3439,7 +3453,14 @@ server <- function(input, output, session) {
       sliderInput(paste0(pre, "_range"), NULL, min = spec$smin, max = spec$smax,
                   value = val, step = spec$step, width = "100%", ticks = FALSE,
                   post = switch(spec$unit, "%" = "%", "°C" = "°C", "mm" = " mm", "")),
-      uiOutput(paste0(pre, "_pass")))
+      tags$div(class = "crit-foot",
+        if (spec$type == "metric" && identical(spec$unit, "%") &&
+            sum(filter_meta$subdimension == spec$sub & filter_meta$valtype == "share") >= 3)
+          tags$a(href = "#", class = "crit-combine",
+                 title = "Turn this into a group: add other categories and filter on their total",
+                 onclick = sprintf("Shiny.setInputValue('crit_to_group', %d, {priority:'event'}); return false;", id),
+                 "\u2795 Combine with other categories"),
+        uiOutput(paste0(pre, "_pass"))))
   }
 
   # Values for a spec: a vector (metric, group total) or a matrix (weather,
@@ -3531,6 +3552,19 @@ server <- function(input, output, session) {
     id <- as.integer(input$crit_remove)
     removeUI(selector = paste0("#crit_", id))
     crits(Filter(function(s) s$id != id, crits()))
+  })
+
+  # Single-category card -> category group, keeping its category and range.
+  observeEvent(input$crit_to_group, {
+    id <- as.integer(input$crit_to_group)
+    s0 <- Filter(function(s) s$id == id, crits())
+    if (!length(s0)) return()
+    s0  <- s0[[1]]
+    rng <- input[[paste0("crit_", id, "_range")]] %||% c(s0$smin, s0$smax)
+    removeUI(selector = paste0("#crit_", id))
+    crits(Filter(function(s) s$id != id, crits()))
+    add_crit(make_crit_spec(paste0("g:", s0$sub)),
+             init = list(cats = s0$key, range = c(rng[1], if (rng[2] >= s0$smax) 100 else rng[2])))
   })
 
   observeEvent(input$crit_season, {
@@ -3675,8 +3709,8 @@ server <- function(input, output, session) {
       code, code, code, build_realestate_url(nm, abbr))
   }
 
-  # Map: results drawn in their own group. Polygons for up to 2,500
-  # suburbs, small dots beyond that so the browser stays responsive.
+  # Map: results drawn in their own group. Polygons for up to
+  # crit_polygon_max suburbs, small dots beyond that.
   observe({
     in_c  <- identical(input$app_mode, "criteria")
     proxy <- leafletProxy("map") |> clearGroup("criteria")
@@ -3689,7 +3723,7 @@ server <- function(input, output, session) {
     if (is.null(tb) || !nrow(tb) || !length(crits()) &&
         !length(region_filter()) && is.null(anchor_state()) &&
         !length(c(cat_coast_filter(), cat_terrain_filter(), cat_remote_filter()))) return()
-    if (nrow(tb) <= 2500) {
+    if (nrow(tb) <= crit_polygon_max) {
       popups <- vapply(tb$code, crit_popup, "")
       shp <- shp_suburb[match(tb$code, shp_suburb$suburb_code_2021), ]
       shp$popup <- popups[!is.na(match(tb$code, shp_suburb$suburb_code_2021))]
