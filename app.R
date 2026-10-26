@@ -980,11 +980,12 @@ compute_dream_raw <- function(theme_refs) {
         raw_per_ref[[r]] |> select(suburb_b, all_of(dim_col))
       })
       joined <- reduce(per_ref, full_join, by = "suburb_b")
-      avg_df <- joined |>
-        rowwise() |>
-        mutate(!!dim_col := mean(c_across(starts_with(dim_col)), na.rm = TRUE)) |>
-        ungroup() |>
-        select(suburb_b, all_of(dim_col))
+      # Vectorised row mean across the references' columns (raw_x, raw_x.x,
+      # raw_x.y, ...). Same result as the earlier rowwise() version, but
+      # ~1000x faster, which matters now Dream results update live.
+      vals   <- as.matrix(joined[, startsWith(names(joined), dim_col), drop = FALSE])
+      avg_df <- tibble(suburb_b = joined$suburb_b,
+                       !!dim_col := rowMeans(vals, na.rm = TRUE))
       dim_tables[[d]] <- avg_df
     }
   }
@@ -1220,10 +1221,13 @@ build_popup <- function(name, abbr, match, rank, national_rank, national_pct,
        <a href='#' onclick=\"Shiny.setInputValue(
          'show_info','%s',{priority:'event'});return false;\">&#8594; About</a>
        &nbsp;&middot;&nbsp;
+       <a href='#' onclick=\"Shiny.setInputValue(
+         'add_compare','%s',{priority:'event'});return false;\">+ Compare</a>
+       &nbsp;&middot;&nbsp;
        <a href='%s' target='_blank' rel='noopener noreferrer'>&#8594; View homes for sale</a>
      </div>",
     name, abbr, scales::percent(match, .1), rank, national_rank, fmt_pct(national_pct),
-    anchor_html, winning_html, why_html, bars, code, code, rea_url)
+    anchor_html, winning_html, why_html, bars, code, code, code, rea_url)
 }
 
 # Popup for clicked suburbs not in current map results (but allowed).
@@ -1772,6 +1776,35 @@ ui <- function(request) fluidPage(
   }
 }
 
+/* ===== Mode switch (Similar / Dream / Compare) ===== */
+.mode-switch { display: flex; justify-content: center; margin: 10px 0 6px; }
+.mode-switch .form-group { margin-bottom: 0; }
+.mode-switch .btn-group { border: 1px solid #c9d3dd; border-radius: 22px; padding: 3px;
+                          background: #f6f8fa; gap: 2px; }
+.mode-switch .btn-group > .btn { border: none !important; border-radius: 18px !important;
+                                 background: transparent; color: #556; font-weight: 600;
+                                 font-size: 13px; padding: 6px 16px; box-shadow: none; }
+.mode-switch .btn-group > .btn small { font-weight: 400; color: #99a; font-size: 11px; margin-left: 6px; }
+.mode-switch .btn-group > .btn:hover { background: #e9eef3; }
+.mode-switch .btn-group > .btn.active,
+.mode-switch .btn-check:checked + .btn { background: #2c7fb8; color: #fff;
+                                         box-shadow: 0 1px 2px rgba(0,0,0,0.15); }
+.mode-switch .btn-group > .btn.active small,
+.mode-switch .btn-check:checked + .btn small { color: #d6e8f5; }
+.mode-dream .ref-sub-wrap { display: none !important; }
+.dream-row { display: grid; grid-template-columns: repeat(4, minmax(190px, 260px));
+             gap: 10px; justify-content: center; margin: 2px 0 8px; }
+.dream-theme { border: 1px solid #e3e3e3; border-radius: 8px; padding: 6px 8px; background: #fcfcfc; min-width: 0; }
+.dream-th { font-size: 10px; font-weight: 700; color: #fff; padding: 2px 8px; border-radius: 9px;
+            letter-spacing: 0.3px; display: inline-block; }
+.dream-hint { font-size: 10.5px; color: #999; margin: 3px 0 4px; line-height: 1.3; }
+.dream-theme .form-group { margin-bottom: 0; }
+@media (max-width: 900px) { .dream-row { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 768px) {
+  .mode-switch .btn-group > .btn { padding: 6px 10px; }
+  .mode-switch .btn-group > .btn small { display: none; }
+}
+
 /* ===== Refine strip + active-criteria chips ===== */
 .refine-toggle { height: 34px; padding: 4px 12px; display: inline-flex; align-items: center; gap: 6px; }
 .refine-toggle.active { background: #eef5fb; border-color: #2c7fb8; color: #1a5a8a; }
@@ -1870,6 +1903,13 @@ ui <- function(request) fluidPage(
     // list card), so switching suburbs or scrolling the list keeps the same
     // theme in view.
 
+    // Mode switch: tag <body> with the current mode so CSS can hide the
+    // Similar-only reference picker in Dream mode.
+    $(document).on('shiny:inputchanged', function(e) {
+      if (e.name === 'app_mode')
+        $('body').removeClass('mode-similar mode-dream mode-compare')
+                 .addClass('mode-' + e.value);
+    });
     // Refine strip: toggle, remembered across visits in the browser.
     function stRefineSet(open, animate) {
       var s = $('#refine-strip');
@@ -1944,16 +1984,6 @@ ui <- function(request) fluidPage(
                        class = "btn-outline-secondary",
                        style = "margin-right: 4px;",
                        title = "How does this work?"),
-          actionButton("open_dream", label = NULL,
-                       icon = icon("wand-magic-sparkles"),
-                       class = "btn-outline-secondary",
-                       style = "margin-right: 4px;",
-                       title = "Build your dream suburb"),
-          actionButton("open_compare", label = NULL,
-                       icon = icon("code-compare"),
-                       class = "btn-outline-secondary",
-                       style = "margin-right: 4px;",
-                       title = "Compare suburbs"),
           downloadButton("export_csv", label = NULL,
                          icon = icon("file-arrow-down"),
                          class = "btn-outline-secondary",
@@ -1968,6 +1998,22 @@ ui <- function(request) fluidPage(
       )
     )
   ),
+
+  # Mode switch: the app's three tasks as equals. Replaces the old wand
+  # (dream suburb) and compare icons in the header. A real input, so it is
+  # bookmarked and restored like any other.
+  tags$div(class = "mode-switch",
+    radioGroupButtons(
+      "app_mode", label = NULL,
+      choiceNames = list(
+        tags$span(icon("magnifying-glass"), " Similar suburbs",
+                  tags$small("like a place you know")),
+        tags$span(icon("wand-magic-sparkles"), " Dream suburb",
+                  tags$small("mix and match")),
+        tags$span(icon("code-compare"), " Compare",
+                  tags$small("side by side"))),
+      choiceValues = c("similar", "dream", "compare"),
+      selected = "similar", size = "sm")),
 
   # Row 2: centred input controls + right-aligned Map/List toggle.
   # Same 3-column flexbox trick: selectors sit in the true centre.
@@ -1989,8 +2035,14 @@ ui <- function(request) fluidPage(
           div(class = "inline-topn", style = "width:60px;",
               numericInput("top_n_input_inline", NULL,
                            value = 20, min = 1, step = 1, width = "100%")),
-          tags$span("suburbs similar to", style = "font-size:14px;"),
-          div(style = "min-width:240px; flex:0 1 auto; max-width:460px;",
+          # Similar mode: "suburbs similar to [ref]". Dream mode: "suburbs
+          # that combine", with the theme pickers on the row below.
+          conditionalPanel("input.app_mode != 'dream'", inline = TRUE,
+            tags$span("suburbs similar to", style = "font-size:14px;")),
+          conditionalPanel("input.app_mode == 'dream'", inline = TRUE,
+            tags$span("suburbs that combine", style = "font-size:14px;")),
+          div(class = "ref-sub-wrap",
+              style = "min-width:240px; flex:0 1 auto; max-width:460px;",
               virtualSelectInput("ref_sub", NULL,
                                  choices = ref_choices, selected = default_ref_code,
                                  multiple = TRUE, width = "100%", search = TRUE,
@@ -2020,6 +2072,29 @@ ui <- function(request) fluidPage(
       )
     )
   ),
+
+  # Dream suburb: one picker per theme, inline (previously a pop-up).
+  # Results update as you pick, like the Similar search. A theme left empty
+  # is simply not part of the blend.
+  conditionalPanel("input.app_mode == 'dream'",
+    tags$div(class = "dream-row",
+      lapply(names(dream_theme_dims), function(theme_id) {
+        tags$div(class = "dream-theme",
+          tags$span(class = "dream-th",
+                    style = sprintf("background:%s;", theme_group_colours[[theme_id]]),
+                    toupper(dream_theme_labels[[theme_id]])),
+          tags$div(class = "dream-hint",
+                   paste(dim_labels[intersect(sort(dream_theme_dims[[theme_id]]),
+                                              names(dim_labels))],
+                         collapse = ", ")),
+          virtualSelectInput(paste0("dream_", theme_id, "_refs"), NULL,
+                             choices = ref_choices, selected = character(0),
+                             multiple = TRUE, search = TRUE, width = "100%",
+                             placeholder = "any (leave empty to skip)",
+                             showValueAsTags = TRUE, optionsCount = 10,
+                             autoSelectFirstOption = FALSE,
+                             disableOptionGroupCheckbox = TRUE))
+      }))),
 
   # Active-criteria chips: what's currently narrowing or steering the
   # results, each removable, plus "Clear all". Visible whether or not the
@@ -2116,13 +2191,13 @@ ui <- function(request) fluidPage(
              "Close \u25b4"))),
 
   # Click-to-set-reference hint, centred just under the inputs
-  tags$div(style = "text-align: center; font-size: 11px; color: #666;
-                    margin: 0 0 8px 0;",
-    icon("circle-info"),
-    " Click any suburb on the map to set it as the reference."),
+  conditionalPanel("input.app_mode != 'dream'",
+    tags$div(style = "text-align: center; font-size: 11px; color: #666;
+                      margin: 0 0 8px 0;",
+      icon("circle-info"),
+      " Click any suburb on the map to set it as the reference.")),
   # View mode toggle now lives in the inputs row above. Banner here only
   # when dream-suburb mode is active, sitting above the main view.
-  uiOutput("dream_banner"),
 
   # "What's this suburb like" overview: one bullet per active characteristic
   # describing how close the top matches are. Auto-hidden when no results.
@@ -2167,18 +2242,10 @@ ui <- function(request) fluidPage(
   # ----- Compare page -------------------------------------------------
   conditionalPanel(condition = "output.page_is_compare",
     tags$div(style = "padding: 10px 4px;",
-      tags$div(style = "display:flex; align-items:center; gap:10px;
-                        margin: 10px 0 14px 0;",
-        actionButton("compare_back", "Back to search",
-                    icon = icon("arrow-left"),
-                    class = "btn-outline-secondary btn-sm"),
-        tags$h4("Compare suburbs", style = "margin:0; font-size:15px;
-                                            font-weight:600; color:#444;")),
-
-      tags$div(style = "display:flex; gap:20px; flex-wrap:wrap;
+      tags$div(style = "display:flex; gap:20px; flex-wrap:wrap; justify-content:center;
                         align-items:flex-start; margin-bottom:14px;",
         tags$div(style = "min-width:280px;",
-          tags$label("Reference suburb(s)", style = "font-size:12px;
+          tags$label("Compare reference suburb(s)", style = "font-size:12px;
                                                       font-weight:600;"),
           virtualSelectInput("compare_refs", NULL,
                              choices = ref_choices, selected = character(0),
@@ -2235,8 +2302,14 @@ server <- function(input, output, session) {
   outputOptions(output, "page_is_main",    suspendWhenHidden = FALSE)
   outputOptions(output, "page_is_compare", suspendWhenHidden = FALSE)
 
-  observeEvent(input$open_compare, { page_mode("compare") })
-  observeEvent(input$compare_back, { page_mode("main") })
+  # The mode switch drives which page shows. Entering Compare pre-fills its
+  # reference with the current search reference if it's still empty.
+  observeEvent(input$app_mode, {
+    page_mode(if (identical(input$app_mode, "compare")) "compare" else "main")
+    if (identical(input$app_mode, "compare") && !length(input$compare_refs))
+      updateVirtualSelect(session = session, inputId = "compare_refs",
+                          selected = current_ref())
+  }, ignoreInit = TRUE)
 
   # Suburb whose facts are shown in the info panel (NULL = panel hidden)
   clicked_suburb  <- reactiveVal(NULL)
@@ -2533,7 +2606,7 @@ server <- function(input, output, session) {
     "map_bounds", "map_center", "map_zoom_event",
     "set_ref", "open_settings", "apply_settings", "reset_settings",
     "open_methodology",
-    "clear_filters_empty", "show_info", "chip_remove",
+    "clear_filters_empty", "show_info", "chip_remove", "add_compare",
     "region_dd", "region_dd_state", "filters_dd"
   ))
 
@@ -2570,6 +2643,10 @@ server <- function(input, output, session) {
     updateVirtualSelect(session, "ref_sub", selected = current_ref())
     if (length(state$input$anchor_sub))
       updateVirtualSelect(session, "anchor_sub", selected = state$input$anchor_sub)
+    for (id in c(paste0("dream_", names(dream_theme_dims), "_refs"),
+                 "compare_refs", "compare_others"))
+      if (length(state$input[[id]]))
+        updateVirtualSelect(session, id, selected = state$input[[id]])
     updateNumericInput(session, "top_n_input_inline", value = top_n_active())
     updatePickerInput(session, "cat_coast_pick",   selected = cat_coast_filter())
     updatePickerInput(session, "cat_terrain_pick", selected = cat_terrain_filter())
@@ -2687,6 +2764,7 @@ server <- function(input, output, session) {
   match_df <- reactive({
     dream <- dream_refs_active()
     setts <- settings_active()
+    if (identical(input$app_mode, "dream") && is.null(dream)) return(NULL)
 
     # ----- Dream-suburb mode --------------------------------------------
     # The synthetic raw_wide already averages within themes, so we feed it
@@ -3095,153 +3173,37 @@ server <- function(input, output, session) {
   })
 
   # ===== Dream-suburb mode ================================================
-  # Modal lets the user pick reference suburbs for each of four themes
-  # (people, urban, nature, amenities) plus optional hard filters. On Apply, the
-  # dream_refs_active reactiveVal is set and match_df switches branch to
-  # the dream computation. A banner above the view shows what blend is
-  # currently active and offers a "back to single reference" link.
-  observeEvent(input$open_dream, {
-    cur <- dream_refs_active()
-    pre <- cur$theme_refs %||% list()
+  # Dream mode is chosen with the mode switch; the four theme pickers sit
+  # inline under the search line. dream_refs_active() holds the blend while
+  # Dream mode is on and at least one theme has a pick (NULL otherwise), so
+  # match_df() and everything downstream are unchanged. Region and coast
+  # limits come from the Refine strip, as in Similar mode.
+  dream_theme_inputs <- reactive({
+    list(people    = input$dream_people_refs    %||% character(0),
+         urban     = input$dream_urban_refs     %||% character(0),
+         nature    = input$dream_nature_refs    %||% character(0),
+         amenities = input$dream_amenities_refs %||% character(0))
+  }) |> debounce(400)
 
-    theme_picker <- function(theme_id, label, hint, selected) {
-      tags$div(style = "margin-bottom: 14px;",
-        tags$label(style = "font-size: 11px; font-weight: 600;
-                            letter-spacing: 0.5px; color: #555;
-                            text-transform: uppercase; display: block;
-                            margin-bottom: 2px;", label),
-        tags$div(style = "font-size: 11px; color: #888; margin-bottom: 4px;",
-                 hint),
-        virtualSelectInput(
-          paste0("dream_", theme_id, "_refs"), label = NULL,
-          choices = ref_choices, selected = selected,
-          multiple = TRUE, search = TRUE, width = "100%",
-          showValueAsTags = TRUE, optionsCount = 12))
+  observe({
+    in_dream <- identical(input$app_mode, "dream")
+    picks    <- dream_theme_inputs()
+    new_val  <- if (in_dream && length(unlist(picks)))
+      list(theme_refs = picks, filter_state = "", filter_coast = FALSE) else NULL
+    if (!identical(new_val, isolate(dream_refs_active()))) dream_refs_active(new_val)
+  })
+
+  # First switch into Dream with every theme empty: start from the current
+  # reference in all four themes (same results as Similar), then the user
+  # swaps out the themes they want to change.
+  observeEvent(input$app_mode, {
+    if (identical(input$app_mode, "dream") && !length(unlist(dream_theme_inputs()))) {
+      for (theme_id in names(dream_theme_dims))
+        updateVirtualSelect(session = session,
+                            inputId = paste0("dream_", theme_id, "_refs"),
+                            selected = current_ref())
     }
-
-    showModal(modalDialog(
-      title = tagList(icon("wand-magic-sparkles"), " Build your dream suburb"),
-      size = "l", easyClose = TRUE,
-      tags$p(style = "font-size: 12px; color: #666;",
-        "Pick one or more reference suburbs for any theme(s) below for ",
-        "your themes of choice. You can leave themes empty too if you ",
-        "don't want them included. Each theme can draw on different ",
-        "references, e.g. ", tags$em("people like Tecoma"),
-        ", ", tags$em("urban feel like Hawthorn"), ", ",
-        tags$em("nature like Sorrento"), ". The results are ranked by how ",
-        "well each suburb matches the blend."),
-      theme_picker("people", "People & culture",
-                   "voting, people, diversity, socioeconomic",
-                   pre$people),
-      theme_picker("urban",  "Urban fabric & economy",
-                   "remoteness, employment, housing, land use, density",
-                   pre$urban),
-      theme_picker("nature", "Nature & climate",
-                   "water, weather, terrain, vegetation, coast",
-                   pre$nature),
-      theme_picker("amenities", "Amenities",
-                   "dining, public transport, fresh food, cultural amenities, community infrastructure, tertiary education, health infrastructure, kinder, schools",
-                   pre$amenities),
-      tags$hr(style = "margin: 8px 0;"),
-      tags$label(style = "font-size: 11px; font-weight: 600;
-                          letter-spacing: 0.5px; color: #555;
-                          text-transform: uppercase;",
-                 "Hard filters (optional)"),
-      tags$div(style = "display: flex; gap: 16px; align-items: center;
-                        flex-wrap: wrap; margin-top: 6px;",
-        pickerInput("dream_filter_state", "Limit to state:",
-                    choices = c("Any" = "",
-                                setNames(names(state_abbr), names(state_abbr))),
-                    selected = cur$filter_state %||% "",
-                    width = "200px",
-                    options = pickerOptions(style = "btn-default")),
-        materialSwitch("dream_filter_coast", "Coast or near-coast only",
-                       value = isTRUE(cur$filter_coast),
-                       status = "primary", inline = TRUE, right = TRUE)),
-      footer = tagList(
-        if (!is.null(cur)) actionButton("clear_dream_modal",
-                                        "Clear & exit",
-                                        class = "btn-outline-secondary"),
-        modalButton("Cancel"),
-        actionButton("apply_dream", "Build", class = "btn-primary"))
-    ))
-  })
-
-  observeEvent(input$apply_dream, {
-    theme_refs <- list(
-      people    = input$dream_people_refs    %||% character(0),
-      urban     = input$dream_urban_refs     %||% character(0),
-      nature    = input$dream_nature_refs    %||% character(0),
-      amenities = input$dream_amenities_refs %||% character(0))
-
-    if (!length(unlist(theme_refs))) {
-      showNotification("Pick at least one reference suburb in any theme.",
-                       type = "warning", duration = 4)
-      return()
-    }
-
-    dream_refs_active(list(
-      theme_refs   = theme_refs,
-      filter_state = input$dream_filter_state %||% "",
-      filter_coast = isTRUE(input$dream_filter_coast)))
-
-    removeModal()
-  })
-
-  observeEvent(input$clear_dream_modal, {
-    dream_refs_active(NULL)
-    removeModal()
-  })
-
-  observeEvent(input$clear_dream, {
-    dream_refs_active(NULL)
-  })
-
-  output$dream_banner <- renderUI({
-    dream <- dream_refs_active()
-    if (is.null(dream)) return(NULL)
-
-    label_refs <- function(codes) {
-      if (!length(codes)) return(NULL)
-      paste(vapply(codes,
-        \(c) suburb_code_to_name[[c]] %||% c,
-        character(1)), collapse = " + ")
-    }
-
-    bits <- list(
-      people    = label_refs(dream$theme_refs$people),
-      urban     = label_refs(dream$theme_refs$urban),
-      nature    = label_refs(dream$theme_refs$nature),
-      amenities = label_refs(dream$theme_refs$amenities))
-    bits <- compact(bits)
-
-    pieces <- imap(bits, function(refs, theme) {
-      tagList(tags$b(dream_theme_labels[[theme]], ": "),
-              tags$span(refs))
-    })
-    # Join with " · " separators
-    joined <- list()
-    for (i in seq_along(pieces)) {
-      joined[[length(joined) + 1]] <- pieces[[i]]
-      if (i < length(pieces))
-        joined[[length(joined) + 1]] <-
-          tags$span(style = "color:#999; margin: 0 6px;", "·")
-    }
-
-    tags$div(
-      style = "background: #F3F0FA; border: 1px solid #B9A6DD;
-               border-radius: 4px; padding: 6px 12px; margin-bottom: 8px;
-               font-size: 12px; display: flex; align-items: center; gap: 10px;
-               flex-wrap: wrap;",
-      tags$span(style = "color: #7B5FA8;",
-                icon("wand-magic-sparkles")),
-      tags$b("Dream suburb:"),
-      do.call(tagList, joined),
-      tags$a(href = "#", style = "margin-left: auto; font-size: 11px;",
-        onclick = "Shiny.setInputValue('clear_dream', Math.random(),
-                   {priority:'event'});return false;",
-        "← Back to single-reference mode"))
-  })
+  }, ignoreInit = TRUE)
 
   observeEvent(input$open_methodology, {
     showModal(modalDialog(
@@ -3388,7 +3350,9 @@ server <- function(input, output, session) {
       clearGroup("sa4") |> clearGroup("clickpop") |> clearControls()
     
     if (is.null(d) || nrow(d) == 0) {
-      showNotification("No suburbs to show. Trying widening the region selection or changing settings.", type = "warning")
+      if (!identical(isolate(input$app_mode), "dream") ||
+          !is.null(isolate(dream_refs_active())))
+        showNotification("No suburbs to show. Trying widening the region selection or changing settings.", type = "warning")
       return()
     }
 
@@ -3884,6 +3848,16 @@ server <- function(input, output, session) {
 
   output$list_view <- renderUI({
     d <- match_df()
+    if (identical(input$app_mode, "dream") && is.null(dream_refs_active())) {
+      return(tags$div(
+        style = paste(
+          "max-width: 480px; margin: 60px auto; padding: 24px;",
+          "border: 1px solid #e6e6e6; border-radius: 8px;",
+          "background: #fafafa; text-align: center; font-size: 13px; color: #666;"),
+        tags$div(icon("wand-magic-sparkles", class = "fa-2x"),
+                 style = "color: #bbb; margin-bottom: 12px;"),
+        "Pick a suburb for at least one theme above to build your dream suburb."))
+    }
     if (is.null(d) || nrow(d) == 0) {
       # Build a list of currently active filters for the empty-state card
       active_filters <- list()
@@ -4025,6 +3999,12 @@ server <- function(input, output, session) {
                      "Shiny.setInputValue('set_ref','%s',{priority:'event'});return false;",
                      code),
                    "→ Set as reference"),
+            tags$a(href = "#", style = "font-size: 11px;",
+                   title = "Add to the Compare page",
+                   onclick = sprintf(
+                     "Shiny.setInputValue('add_compare','%s',{priority:'event'});return false;",
+                     code),
+                   "+ Compare"),
             tags$a(href = rea_url, target = "_blank",
                    rel = "noopener noreferrer", style = "font-size: 11px;",
                    "→ realestate.com.au")
@@ -4065,6 +4045,35 @@ server <- function(input, output, session) {
   observeEvent(input$set_ref, {
     id <- input$set_ref; req(id)
     updateVirtualSelect(session = session, inputId = "ref_sub", selected = id)
+    if (!identical(input$app_mode, "similar"))
+      updateRadioGroupButtons(session, "app_mode", selected = "similar")
+  })
+
+  # "+ Compare" from popups and list cards: add the suburb to the Compare
+  # page's list (pre-filling the Compare reference if empty) without
+  # leaving the current view. Total capped at 10, as on the Compare page.
+  observeEvent(input$add_compare, {
+    id <- input$add_compare; req(id)
+    refs   <- input$compare_refs %||% character(0)
+    if (!length(refs)) {
+      refs <- if (!is.null(dream_refs_active())) character(0) else current_ref()
+      updateVirtualSelect(session = session, inputId = "compare_refs", selected = refs)
+    }
+    others <- input$compare_others %||% character(0)
+    nm <- suburb_code_to_name[[id]] %||% id
+    if (id %in% c(refs, others)) {
+      showNotification(sprintf("%s is already in Compare.", nm), duration = 3)
+      return()
+    }
+    if (length(refs) + length(others) >= 10) {
+      showNotification("Compare holds up to 10 suburbs. Remove one there first.",
+                       type = "warning", duration = 4)
+      return()
+    }
+    others <- c(others, id)
+    updateVirtualSelect(session = session, inputId = "compare_others", selected = others)
+    showNotification(sprintf("Added %s to Compare (%d suburb%s).", nm, length(others),
+                             if (length(others) == 1) "" else "s"), duration = 3)
   })
 
   # --- Suburb info side panel ---------------------------------------------
