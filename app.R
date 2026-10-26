@@ -941,6 +941,19 @@ anchor_note <- function(code, anchor, straight_line = FALSE) {
          if (straight_line) " (straight line)" else "")
 }
 
+# Region tree picks come back with every child ticked (picking Victoria
+# returns Victoria, its GCCs and all its SA4s). For display, keep only the
+# top-most picks: drop a GCC whose state is picked, an SA4 whose GCC is.
+region_parent <- local({
+  h <- distinct(ref, state_name_2021, gcc_name_2021, sa4_name_2021)
+  c(setNames(h$state_name_2021, h$gcc_name_2021),
+    setNames(h$gcc_name_2021,   h$sa4_name_2021))
+})
+compact_regions <- function(sel) {
+  sel <- unique(sel)
+  sel[!(unname(region_parent[sel]) %in% sel)]
+}
+
 # ===== Helpers ============================================================
 
 # Load all raw_* for one reference suburb 
@@ -1759,16 +1772,33 @@ ui <- function(request) fluidPage(
   }
 }
 
-/* ===== near-a-place anchor control ===== */
-.anchor-add { font-size: 13px; color: #2c7fb8; text-decoration: none; white-space: nowrap;
-              border-bottom: 1px dashed #2c7fb8; margin-left: 6px; }
-.anchor-add:hover { color: #1a5a8a; border-bottom-color: #1a5a8a; }
-.anchor-block { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap;
-                margin-left: 4px; padding: 3px 8px; border-radius: 6px;
-                background: #fdf2f6; border: 1px solid #f3c7d6; }
-.anchor-block .form-group { margin-bottom: 0; }
-.anchor-x { font-size: 18px; line-height: 1; color: #888; text-decoration: none; padding: 0 2px; }
-.anchor-x:hover { color: #333; }
+/* ===== Refine strip + active-criteria chips ===== */
+.refine-toggle { height: 34px; padding: 4px 12px; display: inline-flex; align-items: center; gap: 6px; }
+.refine-toggle.active { background: #eef5fb; border-color: #2c7fb8; color: #1a5a8a; }
+.refine-count { display: none; background: #2c7fb8; color: #fff; border-radius: 9px;
+                font-size: 11px; font-weight: 600; padding: 0 6px; line-height: 17px; }
+.refine-caret { font-size: 10px; color: #888; }
+.refine-strip { border: 1px solid #e3e8ee; border-radius: 8px; background: #fafbfc;
+                padding: 10px 14px 6px; margin: 2px 0 10px; }
+.refine-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px 22px; }
+.refine-h { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px;
+            color: #666; margin-bottom: 4px; }
+.refine-help { font-size: 11px; color: #888; line-height: 1.35; margin-bottom: 6px; }
+.refine-tree { max-height: 230px; overflow-y: auto; border: 1px solid #e6e6e6; border-radius: 6px;
+               background: #fff; padding: 4px; }
+.refine-col .form-group { margin-bottom: 8px; }
+.refine-col .control-label { font-size: 12px; font-weight: 600; color: #444; margin-bottom: 2px; }
+.refine-col .shiny-options-group, .refine-col .radio-inline { font-size: 12px; }
+.refine-link { font-size: 12.5px; font-weight: 600; text-decoration: none; }
+.refine-foot { text-align: right; font-size: 11px; margin-top: 2px; }
+.ac-row { display: flex; flex-wrap: wrap; justify-content: center; align-items: center;
+          gap: 6px; margin: 0 0 8px; }
+.ac-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: #1a5a8a;
+           background: #eef5fb; border: 1px solid #cfe2f1; border-radius: 12px; padding: 2px 10px; }
+.ac-chip.ac-removable { padding-right: 6px; }
+.ac-x { color: #6b8fae; text-decoration: none; font-size: 14px; line-height: 1; }
+.ac-x:hover { color: #1a5a8a; }
+.ac-clear { font-size: 11.5px; color: #888; margin-left: 4px; }
 .anchor-note { font-size: 11px; color: #D6336C; white-space: nowrap; }
 
 /* ===== Suburb profile panel (sentence + charts) ===== */
@@ -1822,24 +1852,6 @@ ui <- function(request) fluidPage(
 .st-compare-sentence { font-size: 11.5px; line-height: 1.4; color: #555; margin: 2px 0 0 16px; }
 ")),
   tags$script(HTML("
-    // Update the Filters dropdown button label with the active count
-    Shiny.addCustomMessageHandler('update_filters_label', function(n) {
-      var btn = $('button[data-toggle=\"dropdown\"]').filter(function(){
-        return $(this).text().trim().indexOf('Filters') === 0;
-      });
-      if (btn.length) {
-        var baseHtml = btn.data('base-html');
-        if (!baseHtml) {
-          baseHtml = btn.html();
-          btn.data('base-html', baseHtml);
-        }
-        if (n > 0) {
-          btn.html(baseHtml.replace(/Filters( \\(\\d+\\))?/, 'Filters (' + n + ')'));
-        } else {
-          btn.html(baseHtml);
-        }
-      }
-    });
     // When the user dismisses the popup via the leaflet X close button,
     // notify the server so its popup-state tracker stays accurate (the
     // next basemap click should then open a fresh popup rather than being
@@ -1853,20 +1865,29 @@ ui <- function(request) fluidPage(
     // list card), so switching suburbs or scrolling the list keeps the same
     // theme in view.
 
-    // Near-a-place: open / close the anchor controls. Opening ticks the
-    // hidden anchor_on checkbox (so conditionalPanels and bookmarking see
-    // it) and pops the suburb picker open; closing also clears the picks.
-    function stAnchorOpen() {
-      $('#anchor_on').prop('checked', true).trigger('change');
-      setTimeout(function() {
-        var el = document.querySelector('#anchor_sub');
-        try { if (el && el.open) el.open(); } catch (e) {}
-      }, 200);
+    // Refine strip: toggle, remembered across visits in the browser.
+    function stRefineSet(open, animate) {
+      var s = $('#refine-strip');
+      if (open) { if (animate) s.slideDown(150); else s.show(); }
+      else      { if (animate) s.slideUp(150);   else s.hide(); }
+      $('#refine_toggle').toggleClass('active', open)
+        .find('.refine-caret').text(open ? '\\u25b4' : '\\u25be');
+      try { localStorage.setItem('stRefineOpen', open ? '1' : '0'); } catch (e) {}
     }
-    function stAnchorClose() {
-      $('#anchor_on').prop('checked', false).trigger('change');
-      Shiny.setInputValue('anchor_clear', Math.random(), {priority: 'event'});
+    function stRefineToggle() {
+      stRefineSet(!$('#refine-strip').is(':visible'), true);
     }
+    $(function() {
+      var o = false;
+      try { o = localStorage.getItem('stRefineOpen') === '1'; } catch (e) {}
+      if (o) stRefineSet(true, false);
+    });
+    // Count of active refinements shown on the Refine button.
+    $(document).on('shiny:connected', function() {
+      Shiny.addCustomMessageHandler('refine_count', function(n) {
+        $('#refine_count').text(n > 0 ? n : '').toggle(n > 0);
+      });
+    });
     window.stTab = window.stTab || 'people';
     function stApplyTabs() {
       $('.st-panel').each(function() {
@@ -1972,127 +1993,15 @@ ui <- function(request) fluidPage(
                                  showValueAsTags = TRUE, autoSelectFirstOption = FALSE,
                                  keepAlwaysOpen = FALSE,
                                  disableOptionGroupCheckbox = TRUE)),
-          conditionalPanel(
-            condition = "input.ref_sub && input.ref_sub.length > 1",
-            div(style = "display:flex; align-items:center; gap:4px;",
-                tags$span("matching", style = "font-size:13px; color:#555;"),
-                radioButtons("multi_mode", NULL,
-                             choices  = c("Closest to any individual reference" = "max",
-                                          "Closest to all references on average" = "mean"),
-                             selected = "max", inline = TRUE),
-                tags$span(
-                  icon("circle-info"),
-                  style = "cursor: help; color: #888; font-size: 13px;",
-                  title = paste(
-                    "Match any: find suburbs strongly similar to any one of your references",
-                    "(best individual fit).",
-                    "Balanced across all: find suburbs similar across all your references",
-                    "(mean across all)."
-                  )))),
-          tags$span("in", style = "font-size:14px;"),
-          dropdownButton(
-            inputId = "region_dd",
-            label   = "Regions",
-            icon    = icon("globe"),
-            status  = "default",
-            width   = "340px",
-            circle  = FALSE,
-            div(style = "max-height: 380px; overflow-y: auto; padding: 4px;",
-                treeInput("region_pick", label = NULL, choices = region_tree,
-                          selected = default_tree_selection,
-                          returnValue = "text", closeDepth = 0))
-          ),
-          dropdownButton(
-            inputId = "filters_dd",
-            label   = "Filters",
-            icon    = icon("filter"),
-            status  = "default",
-            width   = "300px",
-            right   = TRUE,
-            circle  = FALSE,
-            div(style = "padding: 6px;",
-                tags$div(style = "font-size: 11px; color: #666; margin-bottom: 8px;",
-                         tags$div(tags$b("How filters work:")),
-                         tags$div("Selecting a category restricts matches to that specific group and automatically removes ",
-                                  "that characteristic from the match score. For example, filtering to coastal ",
-                                  "suburbs means the remaining 13 characteristics will determine the final similarity rank. ",
-                                  "Leave a filter blank to score across all characteristics"),
-                         tags$div(style = "margin-top: 4px;",
-                                  "Leave a filter empty (",
-                                  tags$em("any"), ") to keep its characteristic in the match.")),
-                pickerInput("cat_coast_pick", "Coast",
-                            choices  = cat_coast_choices, selected = character(0),
-                            multiple = TRUE, width = "100%",
-                            options  = pickerOptions(actionsBox = TRUE,
-                                                     selectedTextFormat = "count > 2",
-                                                     countSelectedText  = "{0} selected",
-                                                     noneSelectedText   = "any")),
-                pickerInput("cat_terrain_pick", "Terrain",
-                            choices  = cat_terrain_choices, selected = character(0),
-                            multiple = TRUE, width = "100%",
-                            options  = pickerOptions(actionsBox = TRUE,
-                                                     selectedTextFormat = "count > 2",
-                                                     countSelectedText  = "{0} selected",
-                                                     noneSelectedText   = "any")),
-                pickerInput("cat_remote_pick", "Remoteness",
-                            choices  = cat_remote_choices, selected = character(0),
-                            multiple = TRUE, width = "100%",
-                            options  = pickerOptions(actionsBox = TRUE,
-                                                     selectedTextFormat = "count > 2",
-                                                     countSelectedText  = "{0} selected",
-                                                     noneSelectedText   = "any"))
-            )
-          ),
-          tags$span(textOutput("region_summary", inline = TRUE),
-                    style = "font-size:13px; color:#444; margin-left:4px;"),
-          # Optional location preference ("near a place"). Off by default:
-          # only the link shows until the user opens it. anchor_on is a
-          # hidden checkbox so it survives bookmarking like any input.
-          conditionalPanel("!output.dream_on", inline = TRUE,
-            tags$span(style = "display:none;",
-                      checkboxInput("anchor_on", NULL, FALSE)),
-            conditionalPanel("!input.anchor_on", inline = TRUE,
-              tags$a(href = "#", class = "anchor-add",
-                     onclick = "stAnchorOpen(); return false;",
-                     title = "Favour suburbs close to a suburb you choose",
-                     icon("location-dot"), " near a place")),
-            conditionalPanel("input.anchor_on", inline = TRUE,
-              tags$span(class = "anchor-block",
-                tags$span("near", style = "font-size:14px;"),
-                div(style = "min-width:200px; max-width:380px;",
-                    virtualSelectInput("anchor_sub", NULL,
-                                       choices = anchor_choices,
-                                       selected = character(0),
-                                       multiple = TRUE, maxValues = anchor_max,
-                                       width = "100%", search = TRUE,
-                                       placeholder = "Pick up to 3 suburbs\u2026",
-                                       optionsCount = 8, showValueAsTags = TRUE,
-                                       autoSelectFirstOption = FALSE,
-                                       disableOptionGroupCheckbox = TRUE)),
-                tags$span("within", style = "font-size:14px;"),
-                div(style = "width:96px;",
-                    selectInput("anchor_radius", NULL,
-                                choices = anchor_radius_choices,
-                                selected = "20", width = "100%")),
-                dropdownButton(
-                  inputId = "anchor_dd", label = NULL, icon = icon("gear"),
-                  status = "default", circle = FALSE, right = TRUE,
-                  width = "280px",
-                  div(style = "padding: 6px;",
-                    radioButtons("anchor_strength", "How much location matters",
-                                 choices = anchor_strength_choices,
-                                 selected = "normal"),
-                    radioButtons("anchor_mode",
-                                 "With several places, favour suburbs near",
-                                 choices = c("Any of them" = "any",
-                                             "All of them" = "all"),
-                                 selected = "any"),
-                    tags$div(style = "font-size:11px; color:#777;",
-                      "Distances are straight-line, between suburb centres. ",
-                      "The match % stays pure similarity; the ranking also ",
-                      "rewards being close."))),
-                tags$a(href = "#", class = "anchor-x", title = "Remove location",
-                       onclick = "stAnchorClose(); return false;", "\u00d7"))))
+          # Secondary controls (regions, filters, location, multi-reference
+          # mode, match settings) live in the collapsible Refine strip below.
+          tags$button(type = "button", id = "refine_toggle",
+                      class = "btn btn-outline-secondary refine-toggle",
+                      onclick = "stRefineToggle(); return false;",
+                      title = "Regions, filters, location and match settings",
+                      icon("sliders"), " Refine",
+                      tags$span(id = "refine_count", class = "refine-count"),
+                      tags$span(class = "refine-caret", "\u25be"))
         ),
         # Right-aligned Map/List toggle
         tags$div(
@@ -2106,6 +2015,100 @@ ui <- function(request) fluidPage(
       )
     )
   ),
+
+  # Active-criteria chips: what's currently narrowing or steering the
+  # results, each removable, plus "Clear all". Visible whether or not the
+  # Refine strip is open.
+  uiOutput("active_chips"),
+
+  # Refine strip: collapsible, closed by default (open/closed is remembered
+  # in the browser). Inputs keep their original IDs, so the server logic
+  # for regions, filters, the location anchor and multi-reference mode is
+  # unchanged.
+  tags$div(id = "refine-strip", class = "refine-strip", style = "display:none;",
+    tags$div(class = "refine-grid",
+      tags$div(class = "refine-col",
+        tags$div(class = "refine-h", icon("globe"), " Where"),
+        tags$div(class = "refine-help",
+                 "Limit results to states, capital-city areas or SA4 regions. ",
+                 "Leave empty for all of Australia."),
+        tags$div(class = "refine-tree",
+                 treeInput("region_pick", label = NULL, choices = region_tree,
+                           selected = default_tree_selection,
+                           returnValue = "text", closeDepth = 0))),
+      tags$div(class = "refine-col",
+        tags$div(class = "refine-h", icon("filter"), " Filters"),
+        tags$div(class = "refine-help",
+                 "Picking a category keeps only those suburbs and drops that ",
+                 "characteristic from the match score. Leave as ", tags$em("any"),
+                 " to keep it in the score."),
+        pickerInput("cat_coast_pick", "Coast",
+                    choices  = cat_coast_choices, selected = character(0),
+                    multiple = TRUE, width = "100%",
+                    options  = pickerOptions(actionsBox = TRUE,
+                                             selectedTextFormat = "count > 2",
+                                             countSelectedText  = "{0} selected",
+                                             noneSelectedText   = "any")),
+        pickerInput("cat_terrain_pick", "Terrain",
+                    choices  = cat_terrain_choices, selected = character(0),
+                    multiple = TRUE, width = "100%",
+                    options  = pickerOptions(actionsBox = TRUE,
+                                             selectedTextFormat = "count > 2",
+                                             countSelectedText  = "{0} selected",
+                                             noneSelectedText   = "any")),
+        pickerInput("cat_remote_pick", "Remoteness",
+                    choices  = cat_remote_choices, selected = character(0),
+                    multiple = TRUE, width = "100%",
+                    options  = pickerOptions(actionsBox = TRUE,
+                                             selectedTextFormat = "count > 2",
+                                             countSelectedText  = "{0} selected",
+                                             noneSelectedText   = "any"))),
+      tags$div(class = "refine-col",
+        tags$div(class = "refine-h", icon("location-dot"), " Location"),
+        conditionalPanel("output.dream_on",
+          tags$div(class = "refine-help", "Not available in dream-suburb mode.")),
+        conditionalPanel("!output.dream_on",
+          tags$div(class = "refine-help",
+                   "Optional: favour suburbs near up to 3 places. The match % ",
+                   "stays pure similarity; the ranking also rewards being close ",
+                   "(straight-line distance between suburb centres)."),
+          virtualSelectInput("anchor_sub", "Near",
+                             choices = anchor_choices, selected = character(0),
+                             multiple = TRUE, maxValues = anchor_max,
+                             width = "100%", search = TRUE,
+                             placeholder = "Pick up to 3 suburbs\u2026",
+                             optionsCount = 8, showValueAsTags = TRUE,
+                             autoSelectFirstOption = FALSE,
+                             disableOptionGroupCheckbox = TRUE),
+          selectInput("anchor_radius", "Within",
+                      choices = anchor_radius_choices, selected = "20",
+                      width = "120px"),
+          radioButtons("anchor_strength", "How much location matters",
+                       choices = anchor_strength_choices, selected = "normal",
+                       inline = TRUE),
+          radioButtons("anchor_mode", "With several places, favour suburbs near",
+                       choices = c("Any of them" = "any", "All of them" = "all"),
+                       selected = "any", inline = TRUE))),
+      tags$div(class = "refine-col",
+        tags$div(class = "refine-h", icon("layer-group"), " References & settings"),
+        conditionalPanel("input.ref_sub && input.ref_sub.length > 1",
+          radioButtons("multi_mode", "With several reference suburbs, find suburbs",
+                       choices  = c("Closest to any one reference" = "max",
+                                    "Closest to all of them on average" = "mean"),
+                       selected = "max")),
+        conditionalPanel("!(input.ref_sub && input.ref_sub.length > 1)",
+          tags$div(class = "refine-help",
+                   "Pick more than one reference suburb to choose how they ",
+                   "are combined.")),
+        tags$a(href = "#", class = "refine-link",
+               onclick = "$('#open_settings').click(); return false;",
+               icon("sliders"), " Match settings"),
+        tags$div(class = "refine-help", style = "margin-top:4px;",
+                 "Choose which characteristics count and whether each should ",
+                 "be similar or different."))),
+    tags$div(class = "refine-foot",
+      tags$a(href = "#", onclick = "stRefineToggle(); return false;",
+             "Close \u25b4"))),
 
   # Click-to-set-reference hint, centred just under the inputs
   tags$div(style = "text-align: center; font-size: 11px; color: #666;
@@ -2259,10 +2262,9 @@ server <- function(input, output, session) {
   output$dream_on <- reactive({ !is.null(dream_refs_active()) })
   outputOptions(output, "dream_on", suspendWhenHidden = FALSE)
 
-  # NULL unless the control is open, at least one suburb is picked and
-  # dream mode is off.
+  # NULL unless at least one suburb is picked and dream mode is off.
   anchor_state <- reactive({
-    if (!isTRUE(input$anchor_on) || !is.null(dream_refs_active())) return(NULL)
+    if (!is.null(dream_refs_active())) return(NULL)
     codes <- head(input$anchor_sub %||% character(0), anchor_max)
     codes <- codes[codes %in% names(suburb_centroid_lat)]
     if (!length(codes)) return(NULL)
@@ -2270,11 +2272,6 @@ server <- function(input, output, session) {
          radius = as.numeric(input$anchor_radius %||% "20"),
          beta   = unname(anchor_strength_beta[input$anchor_strength %||% "normal"]),
          mode   = input$anchor_mode %||% "any")
-  })
-
-  observeEvent(input$anchor_clear, {
-    updateVirtualSelect(session = session, inputId = "anchor_sub",
-                        selected = character(0))
   })
 
   # Anchor pin(s) and radius ring on the map.
@@ -2296,14 +2293,81 @@ server <- function(input, output, session) {
                        label = sprintf("%s (location, %g km radius)", nms, a$radius))
   }, ignoreNULL = FALSE)
 
-  # Update the Filters button label whenever any cat filter changes
+  # Number of active refinements shown on the Refine button.
   observe({
     n <- sum(
+      length(region_filter())      > 0,
       length(cat_coast_filter())   > 0,
       length(cat_terrain_filter()) > 0,
-      length(cat_remote_filter())  > 0
+      length(cat_remote_filter())  > 0,
+      !is.null(anchor_state())
     )
-    session$sendCustomMessage("update_filters_label", n)
+    session$sendCustomMessage("refine_count", n)
+  })
+
+  # Active-criteria chips under the search line.
+  output$active_chips <- renderUI({
+    chips <- list()
+    n_removable <- 0
+    add <- function(key, label, removable = TRUE) {
+      chips[[length(chips) + 1]] <<- tags$span(
+        class = if (removable) "ac-chip ac-removable" else "ac-chip", label,
+        if (removable) tags$a(
+          href = "#", class = "ac-x", title = "Remove",
+          onclick = sprintf(
+            "Shiny.setInputValue('chip_remove','%s',{priority:'event'});return false;", key),
+          "\u00d7"))
+      if (removable) n_removable <<- n_removable + 1
+    }
+    sel <- compact_regions(region_filter())
+    if (length(sel))
+      add("region", paste0("Region: ", if (length(sel) <= 3) paste(sel, collapse = ", ")
+                                       else sprintf("%d regions", length(sel))))
+    if (length(cat_coast_filter()))
+      add("coast", paste0("Coast: ", paste(cat_coast_filter(), collapse = " / ")))
+    if (length(cat_terrain_filter()))
+      add("terrain", paste0("Terrain: ", paste(cat_terrain_filter(), collapse = " / ")))
+    if (length(cat_remote_filter()))
+      add("remote", paste0("Remoteness: ", paste(cat_remote_filter(), collapse = " / ")))
+    a <- anchor_state()
+    if (!is.null(a))
+      add("anchor", sprintf("Near %s (%g km)",
+                            paste(vapply(a$codes, anchor_name, ""), collapse = ", "),
+                            a$radius))
+    if (is.null(dream_refs_active()) && length(current_ref()) > 1)
+      add("multi", paste0("Several references: closest to ",
+                          if ((input$multi_mode %||% "max") == "max") "any one"
+                          else "all on average"),
+          removable = FALSE)
+    if (!length(chips)) return(NULL)
+    tags$div(class = "ac-row", chips,
+      if (n_removable > 1) tags$a(
+        href = "#", class = "ac-clear",
+        onclick = "Shiny.setInputValue('chip_remove','all',{priority:'event'});return false;",
+        "Clear all"))
+  })
+
+  observeEvent(input$chip_remove, {
+    k <- input$chip_remove
+    if (k %in% c("region", "all")) {
+      updateTreeInput(inputId = "region_pick", selected = character(0))
+      region_filter(character(0))
+    }
+    if (k %in% c("coast", "all")) {
+      updatePickerInput(session, "cat_coast_pick", selected = character(0))
+      cat_coast_filter(character(0))
+    }
+    if (k %in% c("terrain", "all")) {
+      updatePickerInput(session, "cat_terrain_pick", selected = character(0))
+      cat_terrain_filter(character(0))
+    }
+    if (k %in% c("remote", "all")) {
+      updatePickerInput(session, "cat_remote_pick", selected = character(0))
+      cat_remote_filter(character(0))
+    }
+    if (k %in% c("anchor", "all"))
+      updateVirtualSelect(session = session, inputId = "anchor_sub",
+                          selected = character(0))
   })
 
   # --- CSV export --------------------------------------------------------
@@ -2464,7 +2528,7 @@ server <- function(input, output, session) {
     "map_bounds", "map_center", "map_zoom_event",
     "set_ref", "open_settings", "apply_settings", "reset_settings",
     "open_methodology",
-    "clear_filters_empty", "show_info",
+    "clear_filters_empty", "show_info", "chip_remove",
     "region_dd", "region_dd_state", "filters_dd"
   ))
 
@@ -2577,36 +2641,6 @@ server <- function(input, output, session) {
     cat_remote_filter(character(0))
   })
 
-  # Compact summary text shown next to the Regions button, including any
-  # active categorical filters.
-  output$region_summary <- renderText({
-    sel <- region_filter()
-    # When nothing is restricted, hide the qualifier entirely. No need to
-    # tell the user "(all of Australia)" since that's the default.
-    region_text <- if (length(sel) == 0) {
-      ""
-    } else if (length(sel) <= 3) {
-      paste0("(", paste(sel, collapse = ", "), ")")
-    } else {
-      sprintf("(%d regions)", length(sel))
-    }
-
-    filt_parts <- c()
-    if (length(cat_coast_filter()) > 0)
-      filt_parts <- c(filt_parts, paste(cat_coast_filter(), collapse = "/"))
-    if (length(cat_terrain_filter()) > 0)
-      filt_parts <- c(filt_parts, paste(cat_terrain_filter(), collapse = "/"))
-    if (length(cat_remote_filter()) > 0)
-      filt_parts <- c(filt_parts, paste(cat_remote_filter(), collapse = "/"))
-
-    if (length(filt_parts) == 0) {
-      region_text
-    } else if (nzchar(region_text)) {
-      paste0(region_text, " · ", paste(filt_parts, collapse = "; "))
-    } else {
-      paste0("(", paste(filt_parts, collapse = "; "), ")")
-    }
-  })
 
   # --- Raw scores (parquet read; refreshes when ref changes) -------------
   # cached version
@@ -3051,7 +3085,7 @@ server <- function(input, output, session) {
                    row_divs))
       ),
       class = "btn-primary",
-      title = "Refine match",
+      title = "Match settings",
       style = "margin-left: 4px; padding: 4px 8px;")
   })
 
@@ -3367,13 +3401,13 @@ server <- function(input, output, session) {
       inner_join(d |> select(all_of(join_cols)),
                  by = c("suburb_code_2021" = "suburb_b")) |>
       mutate(suburb_name_2021 = coalesce(unname(suburb_code_to_name[suburb_code_2021]),
-                                          suburb_name_2021))
+                                         suburb_code_2021))
     
     in_dream <- !is.null(dream_refs_active())
     ref_poly <- shp_suburb |>
       filter(suburb_code_2021 %in% active_ref_codes()) |>
       mutate(suburb_name_2021 = coalesce(unname(suburb_code_to_name[suburb_code_2021]),
-                                          suburb_name_2021))
+                                         suburb_code_2021))
 
     shown_sa4 <- ref |>
       filter(suburb_code_2021 %in% d$suburb_b) |>
@@ -4149,7 +4183,7 @@ server <- function(input, output, session) {
 
     hit  <- shp_suburb[idx[1], ]
     code <- hit$suburb_code_2021
-    nm   <- suburb_code_to_name[[code]] %||% hit$suburb_name_2021
+    nm   <- suburb_code_to_name[[code]] %||% code
     abbr <- suburb_code_to_abbr[[code]] %||% ""
 
     # Feed the info panel regardless of whether a popup can be shown
@@ -4205,7 +4239,7 @@ server <- function(input, output, session) {
     hit  <- shp_suburb |> dplyr::filter(suburb_code_2021 == code)
     if (!nrow(hit)) return()
     co   <- sf::st_coordinates(sf::st_centroid(hit))[1, ]
-    nm   <- suburb_code_to_name[[code]] %||% hit$suburb_name_2021[1]
+    nm   <- suburb_code_to_name[[code]] %||% code
     abbr <- suburb_code_to_abbr[[code]] %||% ""
 
     if (code %in% suburb_info$suburb_code_2021) clicked_suburb(code)
