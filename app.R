@@ -386,7 +386,7 @@ aus_median <- local({
 profile_ref_cache <- new.env(parent = emptyenv())
 profile_ref_data <- function(ref_codes) {
   ref_codes <- unique(ref_codes[!is.na(ref_codes)])
-  key <- paste(sort(ref_codes), collapse = ",")
+  key <- paste0("refs:", paste(sort(ref_codes), collapse = ","))
   if (!is.null(profile_ref_cache[[key]])) return(profile_ref_cache[[key]])
   each <- bind_rows(lapply(ref_codes, function(cd) {
     d <- zero_fill(suburb_series(cd))
@@ -974,6 +974,103 @@ region_parent <- local({
 compact_regions <- function(sel) {
   sel <- unique(sel)
   sel[!(unname(region_parent[sel]) %in% sel)]
+}
+
+# ===== Find by criteria (4th mode) =========================================
+# Users add criteria ("min temp >= 5 C in Jun-Aug", "bachelor degree >= 25%",
+# "these vegetation types together >= 20%") and see every suburb that meets
+# all of them. Data from data-prep script zzzzz_generate_filter_data.R:
+#   filter_wide  one row per allowed suburb, one column per metric (raw values:
+#                shares and percentiles 0-100, degrees C, mm per month)
+#   filter_meta  one row per metric: label, unit, slider range, AUS p25/50/75
+#   filter_hist  30-bin counts per metric, for the histogram behind a slider
+filter_wide <- read_parquet(r2_path("explanatory/filter_wide.parquet")) |>
+  as.data.frame() |>
+  mutate(suburb_code_2021 = as.character(suburb_code_2021))
+filter_meta <- read_parquet(r2_path("explanatory/filter_meta.parquet")) |>
+  as_tibble() |>
+  mutate(theme = recode(theme,
+                        "People & Culture"       = "People & diversity",
+                        "Nature & Climate"       = "Nature & climate",
+                        "Urban Fabric & Economy" = "Urban fabric & economy"))
+filter_hist <- read_parquet(r2_path("explanatory/filter_hist.parquet")) |>
+  as_tibble() |> arrange(col_key, bin)
+filter_hist_by_key <- split(filter_hist$n, filter_hist$col_key)
+filter_meta_by_key <- split(filter_meta, filter_meta$col_key)
+fw_codes <- filter_wide$suburb_code_2021
+fw_population <- unname(setNames(suburb_info$population,
+                                 suburb_info$suburb_code_2021)[fw_codes])
+
+crit_theme_colour <- c("People & diversity"     = theme_group_colours[["people"]],
+                       "Urban fabric & economy" = theme_group_colours[["urban"]],
+                       "Nature & climate"       = theme_group_colours[["nature"]])
+crit_theme_order  <- names(crit_theme_colour)
+
+# Weather criteria: one card per variable, applied to the chosen months.
+crit_weather <- list(
+  tmax = list(label = "Max temperature", prefix = "temperature__tmax"),
+  tmin = list(label = "Min temperature", prefix = "temperature__tmin"),
+  rain = list(label = "Rainfall",        prefix = "rain"))
+crit_seasons <- list(Summer = c("Dec", "Jan", "Feb"), Autumn = c("Mar", "Apr", "May"),
+                     Winter = c("Jun", "Jul", "Aug"), Spring = c("Sep", "Oct", "Nov"),
+                     `All year` = month.abb)
+crit_weather_keys <- function(var, months)
+  paste0(crit_weather[[var]]$prefix, "__", tolower(months))
+
+# "Add a criterion" picker: grouped by theme and subdimension. Values:
+#   m:<col_key>  one metric     w:<tmax|tmin|rain>  weather by month
+#   g:<subdimension>  several share categories added together
+crit_add_choices <- local({
+  m <- filter_meta |> filter(!valtype %in% c("celsius", "mm_month"))
+  m$theme <- factor(m$theme, levels = crit_theme_order)
+  m <- m |> arrange(theme, subdimension, category)
+  m$opt <- ifelse(m$valtype == "percentile",
+                  paste(m$subdimension, "(national percentile)"), m$category)
+  groups <- split(m, paste(m$theme, "·", m$subdimension))
+  groups <- groups[unique(paste(m$theme, "·", m$subdimension))]
+  out <- lapply(groups, function(g) setNames(paste0("m:", g$col_key), g$opt))
+  out[["Nature & climate · Weather by month"]] <-
+    setNames(paste0("w:", names(crit_weather)),
+             vapply(crit_weather, `[[`, "", "label"))
+  combinable <- m |> filter(valtype == "share") |> count(subdimension) |>
+    filter(n >= 3) |> pull(subdimension)
+  out[["Combine categories (together ≥ x%)"]] <-
+    setNames(paste0("g:", combinable),
+             paste0(combinable, ": several categories together"))
+  out
+})
+
+crit_fmt <- function(x, unit) {
+  if (length(x) == 0 || all(is.na(x))) return("–")
+  vapply(x, function(v) {
+    if (is.na(v)) return("–")
+    switch(unit,
+      "%"          = if (v < 10) sprintf("%.1f%%", v) else sprintf("%.0f%%", v),
+      "percentile" = st_ordinal(v / 100),
+      "°C"    = sprintf("%.1f°C", v),
+      "mm"         = sprintf("%.0f mm", v),
+      format(round(v, 1)))
+  }, "")
+}
+
+# Small histogram (HTML bars) with AUS 25th / median / 75th ticks; bars inside
+# the chosen range are highlighted.
+crit_hist_html <- function(counts, smin, smax, rng, ticks, unit) {
+  n  <- length(counts); if (!n) return(NULL)
+  mx <- max(counts, 1)
+  mids <- smin + (seq_len(n) - 0.5) * (smax - smin) / n
+  inr  <- mids >= rng[1] & mids <= rng[2]
+  bars <- paste0('<div class="ch-bar', ifelse(inr, " in", ""), '" style="height:',
+                 sprintf("%.0f", 4 + 96 * sqrt(counts / mx)), '%"></div>', collapse = "")
+  tk <- if (length(ticks) == 3 && all(!is.na(ticks))) {
+    pos <- pmin(100, pmax(0, 100 * (ticks - smin) / (smax - smin)))
+    paste0(sprintf('<div class="ch-tick%s" style="left:%.1f%%"></div>',
+                   c("", " mid", ""), pos), collapse = "")
+  } else ""
+  legend <- if (nzchar(tk)) sprintf(
+    '<div class="ch-legend">Australia: 25th %s · median %s · 75th %s</div>',
+    crit_fmt(ticks[1], unit), crit_fmt(ticks[2], unit), crit_fmt(ticks[3], unit)) else ""
+  HTML(paste0('<div class="ch-wrap"><div class="ch-bars">', bars, tk, '</div></div>', legend))
 }
 
 # ===== Helpers ============================================================
@@ -1831,6 +1928,44 @@ ui <- function(request) fluidPage(
   .mode-switch .btn-group > .btn small { display: none; }
 }
 
+/* ===== Find by criteria ===== */
+.mode-criteria .ref-sub-wrap, .mode-criteria .top10-panel { display: none !important; }
+.crit-panel { max-width: 1400px; margin: 0 auto 8px; }
+.crit-top { display: flex; gap: 10px; align-items: center; justify-content: center; flex-wrap: wrap; }
+.crit-add { flex: 0 1 560px; min-width: 260px; }
+.crit-top .form-group { margin-bottom: 0; }
+.crit-funnel { text-align: center; font-size: 12.5px; color: #555; margin: 8px 0; }
+.crit-funnel b { color: #1a5a8a; }
+.crit-funnel .arrow { color: #aaa; margin: 0 6px; }
+.crit-funnel .hint { display: block; color: #b4005a; font-size: 12px; margin-top: 3px; }
+.crit-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px; }
+.crit-card { background: #fff; border: 1px solid #dde3ea; border-top: 3px solid var(--themec);
+             border-radius: 6px; padding: 7px 12px 4px; min-width: 0; }
+.crit-head { display: flex; align-items: flex-start; gap: 8px; }
+.crit-title { flex: 1; font-size: 12.5px; font-weight: 600; color: #333; line-height: 1.3; }
+.crit-title small { display: block; font-weight: 400; color: #888; font-size: 11px; }
+.crit-x { font-size: 18px; line-height: 1; color: #999; text-decoration: none; }
+.crit-x:hover { color: #333; }
+.crit-card .form-group { margin-bottom: 2px; }
+.crit-quick { font-size: 11px; margin: -2px 0 4px; display: flex; gap: 8px; flex-wrap: wrap; }
+.crit-pass { font-size: 11px; color: #666; text-align: right; margin-bottom: 3px; }
+.crit-pass b { color: #1a5a8a; }
+.crit-card .irs { margin: 0 7px; }
+.ch-wrap { padding: 0 14px; margin-top: 4px; }
+.ch-bars { position: relative; height: 34px; display: flex; align-items: flex-end; gap: 1px; }
+.ch-bar { flex: 1; background: #dfe5ec; border-radius: 1px 1px 0 0; }
+.ch-bar.in { background: #7fb2d9; }
+.ch-tick { position: absolute; bottom: 0; height: 40px; width: 1px; background: #E07B39; opacity: 0.7; }
+.ch-tick.mid { width: 2px; opacity: 1; }
+.ch-legend { font-size: 10.5px; color: #999; text-align: center; margin-top: 2px; }
+.crit-empty { text-align: center; color: #666; font-size: 12.5px; padding: 8px 0 4px; }
+.crit-empty a { margin: 0 6px; font-weight: 600; }
+.crit-res { border: 1px solid #e0e0e0; border-radius: 6px; padding: 8px 12px; margin-bottom: 8px; background: #fff; }
+.crit-res-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.crit-res-head b { font-size: 15px; }
+.crit-vals { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 5px; }
+.crit-val { font-size: 11.5px; background: #f3f6f9; border: 1px solid #e3e8ee; border-radius: 10px; padding: 1px 8px; color: #444; }
+
 /* ===== Refine strip + active-criteria chips ===== */
 .refine-toggle { height: 34px; padding: 4px 12px; display: inline-flex; align-items: center; gap: 6px; }
 .refine-toggle.active { background: #eef5fb; border-color: #2c7fb8; color: #1a5a8a; }
@@ -2036,9 +2171,11 @@ ui <- function(request) fluidPage(
                   tags$small("like a place you know")),
         tags$span(icon("wand-magic-sparkles"), " Dream suburb",
                   tags$small("mix and match")),
+        tags$span(icon("list-check"), " Find by criteria",
+                  tags$small("set your must-haves")),
         tags$span(icon("code-compare"), " Compare",
                   tags$small("side by side"))),
-      choiceValues = c("similar", "dream", "compare"),
+      choiceValues = c("similar", "dream", "criteria", "compare"),
       selected = "similar", size = "sm")),
 
   # Row 2: centred input controls + right-aligned Map/List toggle.
@@ -2057,14 +2194,18 @@ ui <- function(request) fluidPage(
         # Centred selectors (existing .row-align block)
         div(class = "row-align",
             style = "justify-content: center; margin: 0;",
+          conditionalPanel("input.app_mode != 'criteria'", inline = TRUE,
             tags$span("Show ", style = "font-size:14px;"),
-          div(class = "inline-topn", style = "width:60px;",
-              numericInput("top_n_input_inline", NULL,
-                           value = 20, min = 1, step = 1, width = "100%")),
+            div(class = "inline-topn", style = "width:60px; display:inline-block;",
+                numericInput("top_n_input_inline", NULL,
+                             value = 20, min = 1, step = 1, width = "100%"))),
           # Similar mode: "suburbs similar to [ref]". Dream mode: "suburbs
           # that combine", with the theme pickers on the row below.
-          conditionalPanel("input.app_mode != 'dream'", inline = TRUE,
+          conditionalPanel("input.app_mode == 'similar' || input.app_mode == 'compare'", inline = TRUE,
             tags$span("suburbs similar to", style = "font-size:14px;")),
+          conditionalPanel("input.app_mode == 'criteria'", inline = TRUE,
+            tags$span("Find every suburb that meets your must-haves",
+                      style = "font-size:14px;")),
           conditionalPanel("input.app_mode == 'dream'", inline = TRUE,
             tags$span("suburbs with\u2026", style = "font-size:14px;")),
           div(class = "ref-sub-wrap",
@@ -2125,6 +2266,27 @@ ui <- function(request) fluidPage(
     # Example link + prompt when nothing is picked yet.
     uiOutput("dream_prompt")),
 
+  # Find by criteria: add criteria as cards; results = suburbs meeting all.
+  conditionalPanel("input.app_mode == 'criteria'",
+    tags$div(class = "crit-panel",
+      tags$div(class = "crit-top",
+        tags$div(class = "crit-add",
+          virtualSelectInput("crit_add", NULL, choices = crit_add_choices,
+                             selected = character(0), search = TRUE,
+                             placeholder = "+ Add a criterion: temperature, rainfall, education, income, vegetation\u2026",
+                             width = "100%", optionsCount = 10,
+                             autoSelectFirstOption = FALSE,
+                             disableOptionGroupCheckbox = TRUE)),
+        tags$div(class = "crit-sort",
+          selectInput("crit_sort", NULL, width = "230px", selected = "pop_desc",
+                      choices = c("Largest population first" = "pop_desc",
+                                  "Smallest population first" = "pop_asc",
+                                  "Name (A\u2013Z)" = "name",
+                                  "Nearest to location" = "dist")))),
+      uiOutput("crit_funnel"),
+      tags$div(id = "crit-cards", class = "crit-grid"),
+      uiOutput("crit_empty"))),
+
   # Active-criteria chips: what's currently narrowing or steering the
   # results, each removable, plus "Clear all". Visible whether or not the
   # Refine strip is open.
@@ -2176,6 +2338,10 @@ ui <- function(request) fluidPage(
         tags$div(class = "refine-h", icon("location-dot"), " Location"),
         conditionalPanel("output.dream_on",
           tags$div(class = "refine-help", "Not available in dream-suburb mode.")),
+        conditionalPanel("input.app_mode == 'criteria'",
+          tags$div(class = "refine-help", style = "color:#1a5a8a;",
+                   "In Find by criteria, only suburbs within the radius are kept, ",
+                   "and you can sort them nearest first.")),
         conditionalPanel("!output.dream_on",
           tags$div(class = "refine-help",
                    "Optional: favour suburbs near up to 3 places. The match % ",
@@ -2220,7 +2386,7 @@ ui <- function(request) fluidPage(
              "Close \u25b4"))),
 
   # Click-to-set-reference hint, centred just under the inputs
-  conditionalPanel("input.app_mode != 'dream'",
+  conditionalPanel("input.app_mode == 'similar'",
     tags$div(style = "text-align: center; font-size: 11px; color: #666;
                       margin: 0 0 8px 0;",
       icon("circle-info"),
@@ -2441,7 +2607,7 @@ server <- function(input, output, session) {
       add("anchor", sprintf("Near %s (%g km)",
                             paste(vapply(a$codes, anchor_name, ""), collapse = ", "),
                             a$radius))
-    if (is.null(dream_refs_active()) && length(current_ref()) > 1)
+    if (identical(input$app_mode, "similar") && length(current_ref()) > 1)
       add("multi", paste0("Several references: closest to ",
                           if ((input$multi_mode %||% "max") == "max") "any one"
                           else "all on average"),
@@ -2636,6 +2802,7 @@ server <- function(input, output, session) {
     "set_ref", "open_settings", "apply_settings", "reset_settings",
     "open_methodology",
     "clear_filters_empty", "show_info", "chip_remove", "add_compare", "dream_example",
+    "crit_add", "crit_add_quick", "crit_remove", "crit_season",
     "region_dd", "region_dd_state", "filters_dd"
   ))
 
@@ -2794,6 +2961,7 @@ server <- function(input, output, session) {
     dream <- dream_refs_active()
     setts <- settings_active()
     if (identical(input$app_mode, "dream") && is.null(dream)) return(NULL)
+    if (identical(input$app_mode, "criteria")) return(NULL)
 
     # ----- Dream-suburb mode --------------------------------------------
     # The synthetic raw_wide already averages within themes, so we feed it
@@ -3201,6 +3369,406 @@ server <- function(input, output, session) {
       style = "margin-left: 4px; padding: 4px 8px;")
   })
 
+
+  # ===== Find by criteria ==================================================
+  # crits() holds the list of criterion specs; each has its own card (added
+  # with insertUI so existing sliders keep their values) whose inputs are
+  # crit_<id>_range plus _months (weather) or _cats (category groups).
+  crits        <- reactiveVal(list())
+  crit_counter <- reactiveVal(0L)
+
+  make_crit_spec <- function(choice) {
+    type <- substr(choice, 1, 1); key <- substring(choice, 3)
+    if (type == "m") {
+      m <- filter_meta_by_key[[key]]; if (is.null(m)) return(NULL)
+      list(choice = choice, type = "metric", key = key, unit = m$unit,
+           title = if (m$valtype == "percentile") m$subdimension else m$category,
+           subtitle = if (m$valtype == "percentile") "national percentile (0 = lowest)"
+                      else paste(m$subdimension, "· share of the suburb"),
+           short = if (m$valtype == "percentile") m$subdimension else m$category,
+           colour = crit_theme_colour[[m$theme]] %||% "#2c7fb8",
+           smin = m$slider_min, smax = m$slider_max, step = m$slider_step,
+           ticks = c(m$p25, m$p50, m$p75))
+    } else if (type == "w") {
+      wv <- crit_weather[[key]]; if (is.null(wv)) return(NULL)
+      ms <- filter_meta |> filter(col_key %in% crit_weather_keys(key, month.abb))
+      list(choice = choice, type = "weather", key = key, unit = ms$unit[1],
+           title = wv$label, short = wv$label,
+           subtitle = if (key == "rain") "mm per month, in every chosen month"
+                      else "average daily, in every chosen month",
+           colour = crit_theme_colour[["Nature & climate"]],
+           smin = min(ms$slider_min), smax = max(ms$slider_max), step = ms$slider_step[1])
+    } else if (type == "g") {
+      ms <- filter_meta |> filter(subdimension == key, valtype == "share")
+      if (!nrow(ms)) return(NULL)
+      list(choice = choice, type = "group", key = key, unit = "%",
+           title = paste(key, "· categories together"), short = key,
+           subtitle = "pick categories; their shares are added up",
+           colour = crit_theme_colour[[ms$theme[1]]] %||% "#2c7fb8",
+           cats_all = setNames(ms$col_key, ms$category),
+           smin = 0, smax = 100, step = 1)
+    } else NULL
+  }
+
+  crit_card_ui <- function(spec, init = NULL) {
+    id  <- spec$id; pre <- paste0("crit_", id)
+    val <- init$range %||% c(spec$smin, spec$smax)
+    tags$div(id = pre, class = "crit-card", style = sprintf("--themec:%s;", spec$colour),
+      tags$div(class = "crit-head",
+        tags$div(class = "crit-title", spec$title, tags$small(spec$subtitle)),
+        tags$a(href = "#", class = "crit-x", title = "Remove this criterion",
+               onclick = sprintf("Shiny.setInputValue('crit_remove', %d, {priority:'event'}); return false;", id),
+               "×")),
+      if (spec$type == "weather") tagList(
+        pickerInput(paste0(pre, "_months"), NULL, choices = month.abb,
+                    selected = init$months %||% month.abb, multiple = TRUE, width = "100%",
+                    options = pickerOptions(actionsBox = TRUE, selectedTextFormat = "count > 4",
+                                            countSelectedText = "{0} months",
+                                            noneSelectedText = "Pick months")),
+        tags$div(class = "crit-quick",
+          lapply(names(crit_seasons), function(s) tags$a(href = "#", onclick = sprintf(
+            "Shiny.setInputValue('crit_season', {id: %d, s: '%s'}, {priority:'event'}); return false;",
+            id, s), s)))),
+      if (spec$type == "group")
+        pickerInput(paste0(pre, "_cats"), NULL, choices = spec$cats_all,
+                    selected = init$cats %||% character(0), multiple = TRUE, width = "100%",
+                    options = pickerOptions(liveSearch = TRUE, selectedTextFormat = "count > 2",
+                                            countSelectedText = "{0} categories",
+                                            noneSelectedText = "Pick categories to add together")),
+      uiOutput(paste0(pre, "_hist")),
+      sliderInput(paste0(pre, "_range"), NULL, min = spec$smin, max = spec$smax,
+                  value = val, step = spec$step, width = "100%", ticks = FALSE,
+                  post = switch(spec$unit, "%" = "%", "°C" = "°C", "mm" = " mm", "")),
+      uiOutput(paste0(pre, "_pass")))
+  }
+
+  # Values for a spec: a vector (metric, group total) or a matrix (weather,
+  # one column per chosen month). NULL when nothing to evaluate yet.
+  crit_values <- function(spec) {
+    pre <- paste0("crit_", spec$id)
+    if (spec$type == "metric") return(filter_wide[[spec$key]])
+    if (spec$type == "weather") {
+      months <- input[[paste0(pre, "_months")]] %||% month.abb
+      if (!length(months)) return(NULL)
+      return(as.matrix(filter_wide[, crit_weather_keys(spec$key, months), drop = FALSE]))
+    }
+    keys <- input[[paste0(pre, "_cats")]] %||% character(0)
+    if (!length(keys)) return(NULL)
+    rowSums(as.matrix(filter_wide[, keys, drop = FALSE]))
+  }
+
+  # TRUE = passes. A slider end left at its limit means "no bound" on that
+  # side, so values beyond the slider range (e.g. above the 99th percentile
+  # cap on shares) still pass. Missing values fail an active criterion.
+  crit_pass <- function(spec, vals, rng) {
+    lo_on <- rng[1] > spec$smin + 1e-9; hi_on <- rng[2] < spec$smax - 1e-9
+    if (is.null(vals) || (!lo_on && !hi_on)) return(NULL)
+    ok <- !is.na(vals) & (!lo_on | vals >= rng[1]) & (!hi_on | vals <= rng[2])
+    if (is.matrix(ok)) rowSums(!ok) == 0 else ok
+  }
+
+  crit_range <- function(spec)
+    input[[paste0("crit_", spec$id, "_range")]] %||% c(spec$smin, spec$smax)
+
+  crit_desc <- function(spec, rng) {
+    lo_on <- rng[1] > spec$smin + 1e-9; hi_on <- rng[2] < spec$smax - 1e-9
+    r <- if (lo_on && hi_on) sprintf("%s–%s", crit_fmt(rng[1], spec$unit), crit_fmt(rng[2], spec$unit))
+         else if (lo_on) paste("≥", crit_fmt(rng[1], spec$unit))
+         else paste("≤", crit_fmt(rng[2], spec$unit))
+    extra <- if (spec$type == "weather") {
+      m <- input[[paste0("crit_", spec$id, "_months")]] %||% month.abb
+      hit <- names(crit_seasons)[vapply(crit_seasons, function(s) setequal(s, m), logical(1))]
+      paste0(" (", if (length(hit)) hit[1] else paste(m, collapse = ", "), ")")
+    } else if (spec$type == "group") {
+      n <- length(input[[paste0("crit_", spec$id, "_cats")]] %||% character(0))
+      sprintf(" (%d categor%s)", n, if (n == 1) "y" else "ies")
+    } else ""
+    paste0(spec$short, " ", r, extra)
+  }
+
+  add_crit <- function(spec, init = NULL) {
+    if (is.null(spec)) return()
+    id <- crit_counter() + 1L; crit_counter(id); spec$id <- id
+    insertUI("#crit-cards", where = "beforeEnd", ui = crit_card_ui(spec, init))
+    crits(c(crits(), list(spec)))
+    pre <- paste0("crit_", id)
+    output[[paste0(pre, "_hist")]] <- renderUI({
+      rng  <- crit_range(spec)
+      if (spec$type == "metric") {
+        counts <- filter_hist_by_key[[spec$key]]; ticks <- spec$ticks
+      } else {
+        v <- crit_values(spec)
+        if (is.null(v)) return(tags$div(class = "ch-legend", "Pick categories to see the spread."))
+        v <- as.vector(v); v <- v[!is.na(v)]
+        b <- pmin(30, pmax(1, floor((v - spec$smin) / (spec$smax - spec$smin) * 30) + 1))
+        counts <- tabulate(b, 30); ticks <- unname(quantile(v, c(.25, .5, .75)))
+      }
+      crit_hist_html(counts, spec$smin, spec$smax, rng, ticks, spec$unit)
+    })
+    output[[paste0(pre, "_pass")]] <- renderUI({
+      res <- criteria_result(); n <- res$alone[[as.character(id)]]
+      tags$div(class = "crit-pass",
+        if (is.null(n)) "Drag the slider to set a limit"
+        else tagList(tags$b(format(n, big.mark = ",")), " of ",
+                     format(length(fw_codes), big.mark = ","), " suburbs pass this on its own"))
+    })
+  }
+
+  add_from_choice <- function(choice) {
+    if (is.null(choice) || !nzchar(choice)) return()
+    add_crit(make_crit_spec(choice))
+  }
+  observeEvent(input$crit_add, {
+    ch <- input$crit_add
+    if (length(ch) && nzchar(ch)) {
+      add_from_choice(ch)
+      updateVirtualSelect(session = session, inputId = "crit_add", selected = character(0))
+    }
+  }, ignoreInit = TRUE)
+  observeEvent(input$crit_add_quick, add_from_choice(input$crit_add_quick))
+
+  observeEvent(input$crit_remove, {
+    id <- as.integer(input$crit_remove)
+    removeUI(selector = paste0("#crit_", id))
+    crits(Filter(function(s) s$id != id, crits()))
+  })
+
+  observeEvent(input$crit_season, {
+    x <- input$crit_season
+    updatePickerInput(session, paste0("crit_", x$id, "_months"),
+                      selected = crit_seasons[[x$s]])
+  })
+
+  # Every criterion input, debounced so dragging a slider doesn't refilter on
+  # each pixel.
+  crit_inputs <- reactive({
+    lapply(crits(), function(s) {
+      pre <- paste0("crit_", s$id)
+      list(input[[paste0(pre, "_range")]], input[[paste0(pre, "_months")]],
+           input[[paste0(pre, "_cats")]])
+    })
+  }) |> debounce(300)
+
+  criteria_result <- reactive({
+    if (!identical(input$app_mode, "criteria")) return(NULL)
+    crit_inputs()
+    specs <- crits()
+    base_codes <- codes_from_cat_filters(
+      tree_codes = allowed_codes_from_tree(region_filter()),
+      coast = cat_coast_filter(), terrain = cat_terrain_filter(),
+      remote = cat_remote_filter())
+    keep <- fw_codes %in% base_codes
+    funnel <- list(list(label = "All suburbs", n = length(fw_codes)))
+    if (!all(keep)) funnel[[2]] <- list(label = "Region & filters", n = sum(keep))
+    a <- anchor_state(); dist <- NULL
+    if (!is.null(a)) {
+      d <- anchor_dist_matrix(fw_codes, a$codes)
+      dist <- apply(d, 1, min)
+      within <- if (identical(a$mode, "all")) apply(d, 1, max) <= a$radius else dist <= a$radius
+      keep <- keep & within
+      funnel[[length(funnel) + 1]] <- list(
+        label = sprintf("Within %g km of %s", a$radius,
+                        paste(vapply(a$codes, anchor_name, ""), collapse = " / ")),
+        n = sum(keep))
+    }
+    alone <- list()
+    for (s in specs) {
+      rng <- isolate(crit_range(s))
+      p <- crit_pass(s, isolate(crit_values(s)), rng)
+      if (is.null(p)) next
+      alone[[as.character(s$id)]] <- sum(p)
+      keep <- keep & p
+      funnel[[length(funnel) + 1]] <- list(label = isolate(crit_desc(s, rng)), n = sum(keep),
+                                           id = s$id)
+    }
+    list(keep = keep, dist = dist, funnel = funnel, alone = alone,
+         n_active = length(alone))
+  })
+
+  criteria_table <- reactive({
+    res <- criteria_result(); if (is.null(res)) return(NULL)
+    tb <- tibble(code = fw_codes, name = filter_wide$display_name,
+                 state = unname(state_abbr[filter_wide$state_name_2021]),
+                 population = fw_population,
+                 dist = res$dist %||% NA_real_)[res$keep, ]
+    switch(input$crit_sort %||% "pop_desc",
+      pop_asc = arrange(tb, population, name),
+      name    = arrange(tb, name),
+      dist    = if (all(is.na(tb$dist))) arrange(tb, desc(population)) else arrange(tb, dist),
+      arrange(tb, desc(population), name))
+  })
+
+  output$crit_funnel <- renderUI({
+    res <- criteria_result(); if (is.null(res)) return(NULL)
+    steps <- res$funnel
+    parts <- lapply(seq_along(steps), function(i) tagList(
+      if (i > 1) tags$span(class = "arrow", "→"),
+      tags$span(if (i > 1) paste0(steps[[i]]$label, ": "), tags$b(format(steps[[i]]$n, big.mark = ",")),
+                if (i == 1) " suburbs")))
+    n_final <- steps[[length(steps)]]$n
+    hint <- if (n_final == 0 && length(res$alone)) {
+      worst <- names(res$alone)[which.min(unlist(res$alone))]
+      s <- Filter(function(x) as.character(x$id) == worst, crits())[[1]]
+      tags$span(class = "hint", sprintf(
+        "No suburb meets everything. “%s” is the strictest (%s pass it on its own): try relaxing it.",
+        s$short, format(res$alone[[worst]], big.mark = ",")))
+    }
+    tags$div(class = "crit-funnel", parts, hint)
+  })
+
+  output$crit_empty <- renderUI({
+    if (length(crits())) return(NULL)
+    quick <- c("Min temperature by month" = "w:tmin", "Rainfall by month" = "w:rain",
+               "Household income" = "m:household_income",
+               "Bachelor degree" = "m:educational_attainment__bachelor_degree",
+               "Native vegetation types" = "g:Vegetation")
+    quick <- quick[substring(quick, 3) %in% c(names(crit_weather), filter_meta$col_key,
+                                              filter_meta$subdimension)]
+    tags$div(class = "crit-empty",
+      "Describe the suburb you want: add criteria above and every suburb that meets all of them shows on the map. Quick start:",
+      tags$br(),
+      lapply(names(quick), function(nm) tags$a(href = "#", onclick = sprintf(
+        "Shiny.setInputValue('crit_add_quick', '%s', {priority:'event'}); return false;",
+        quick[[nm]]), paste("+", nm))))
+  })
+
+  # Each criterion's values, computed once per change (not per suburb).
+  crit_values_cache <- reactive({
+    crit_inputs()
+    lapply(crits(), function(s) isolate(crit_values(s)))
+  })
+
+  # One suburb's values for the active criteria, as short labels.
+  crit_values_for <- function(code) {
+    i <- match(code, fw_codes); if (is.na(i)) return(character(0))
+    cache <- crit_values_cache(); specs <- crits()
+    vapply(seq_along(specs), function(k) {
+      s <- specs[[k]]; v <- cache[[k]]; if (is.null(v)) return(NA_character_)
+      x <- if (is.matrix(v)) range(v[i, ], na.rm = TRUE) else v[i]
+      val <- if (length(x) == 2 && !isTRUE(all.equal(x[1], x[2])))
+        paste0(crit_fmt(x[1], s$unit), "–", crit_fmt(x[2], s$unit)) else crit_fmt(x[1], s$unit)
+      paste0(s$short, ": ", val)
+    }, "") |> na.omit() |> as.character()
+  }
+
+  crit_popup <- function(code) {
+    nm <- suburb_code_to_name[[code]] %||% code; abbr <- suburb_code_to_abbr[[code]] %||% ""
+    res <- criteria_result()
+    passes <- !is.null(res) && isTRUE(res$keep[match(code, fw_codes)])
+    vals <- crit_values_for(code)
+    sprintf(
+      "<b>%s, %s</b><br><span style='font-size:11px;color:%s;'>%s</span>
+       <div style='font-size:11px;color:#444;margin:4px 0;'>%s</div>
+       <div style='margin-top:6px;font-size:12px;'>
+         <a href='#' onclick=\"Shiny.setInputValue('show_info','%s',{priority:'event'});return false;\">&#8594; About</a>
+         &nbsp;&middot;&nbsp;
+         <a href='#' onclick=\"Shiny.setInputValue('set_ref','%s',{priority:'event'});return false;\">&#8594; Find similar</a>
+         &nbsp;&middot;&nbsp;
+         <a href='#' onclick=\"Shiny.setInputValue('add_compare','%s',{priority:'event'});return false;\">+ Compare</a>
+         &nbsp;&middot;&nbsp;
+         <a href='%s' target='_blank' rel='noopener noreferrer'>&#8594; Homes for sale</a>
+       </div>",
+      htmltools::htmlEscape(nm), abbr,
+      if (passes) "#1C8356" else "#b4005a",
+      if (passes) "Meets all your criteria" else "Doesn't meet all your criteria",
+      paste(htmltools::htmlEscape(vals), collapse = "<br>"),
+      code, code, code, build_realestate_url(nm, abbr))
+  }
+
+  # Map: results drawn in their own group. Polygons for up to 2,500
+  # suburbs, small dots beyond that so the browser stays responsive.
+  observe({
+    in_c  <- identical(input$app_mode, "criteria")
+    proxy <- leafletProxy("map") |> clearGroup("criteria")
+    if (!in_c) return()
+    # Clear the Similar/Dream layers and their Rank legend (map_data() going
+    # NULL doesn't trigger their observer).
+    proxy |> clearGroup("matches") |> clearGroup("ref") |> clearGroup("sa4") |>
+      clearControls()
+    tb <- criteria_table()
+    if (is.null(tb) || !nrow(tb) || !length(crits()) &&
+        !length(region_filter()) && is.null(anchor_state()) &&
+        !length(c(cat_coast_filter(), cat_terrain_filter(), cat_remote_filter()))) return()
+    if (nrow(tb) <= 2500) {
+      popups <- vapply(tb$code, crit_popup, "")
+      shp <- shp_suburb[match(tb$code, shp_suburb$suburb_code_2021), ]
+      shp$popup <- popups[!is.na(match(tb$code, shp_suburb$suburb_code_2021))]
+      shp <- shp[!is.na(shp$suburb_code_2021), ]
+      proxy |> addPolygons(data = shp, group = "criteria", layerId = ~suburb_code_2021,
+                           fillColor = "#2c7fb8", fillOpacity = 0.55, color = "#1a5a8a",
+                           weight = 1, popup = ~popup,
+                           label = ~suburb_code_to_name[suburb_code_2021],
+                           popupOptions = popupOptions(minWidth = 240, maxWidth = 300),
+                           highlightOptions = highlightOptions(weight = 2, color = "#333",
+                                                               bringToFront = TRUE))
+      bb <- as.numeric(st_bbox(shp))
+    } else {
+      lat <- unname(suburb_centroid_lat[tb$code]); lng <- unname(suburb_centroid_lng[tb$code])
+      # Too many for popups: clicking a dot shows its profile in the side panel.
+      proxy |> addCircleMarkers(lng = lng, lat = lat, group = "criteria", layerId = tb$code,
+                                radius = 3, stroke = FALSE, fillColor = "#2c7fb8",
+                                fillOpacity = 0.7,
+                                label = unname(suburb_code_to_name[tb$code]))
+      bb <- c(min(lng, na.rm = TRUE), min(lat, na.rm = TRUE),
+              max(lng, na.rm = TRUE), max(lat, na.rm = TRUE))
+    }
+    if (isolate(zoom_mode()) == "auto" && all(is.finite(bb)))
+      proxy |> fitBounds(bb[1], bb[2], bb[3], bb[4])
+  })
+
+  observeEvent(input$map_marker_click, {
+    id <- input$map_marker_click$id
+    if (identical(input$app_mode, "criteria") && !is.null(id) && id %in% fw_codes)
+      clicked_suburb(id)
+  })
+
+  criteria_list_ui <- function() {
+    tb <- criteria_table()
+    if (is.null(tb)) return(NULL)
+    if (!nrow(tb)) return(tags$div(class = "crit-empty", style = "margin-top:40px;",
+      "No suburbs meet all your criteria. Try relaxing the strictest one (see the summary above)."))
+    shown <- head(tb, 100)
+    tagList(
+      tags$div(style = "font-size: 11px; color: #666; margin-bottom: 8px;",
+               sprintf("%s suburbs meet your criteria%s.", format(nrow(tb), big.mark = ","),
+                       if (nrow(tb) > 100) "; showing the first 100" else "")),
+      lapply(seq_len(nrow(shown)), function(i) {
+        r <- shown[i, ]; nm <- r$name; abbr <- r$state %||% ""
+        tags$div(class = "crit-res",
+          tags$div(class = "crit-res-head",
+            tags$b(sprintf("%s, %s", nm, abbr)),
+            tags$span(style = "font-size:11px;color:#888;",
+                      if (!is.na(r$population)) paste("population", format(r$population, big.mark = ","))),
+            if (!is.na(r$dist)) tags$span(class = "anchor-note", paste(fmt_km(r$dist), "from location")),
+            tags$div(style = "margin-left:auto; display:flex; gap:8px; font-size:11px;",
+              tags$a(href = "#", onclick = sprintf(
+                "Shiny.setInputValue('set_ref','%s',{priority:'event'});return false;", r$code),
+                "→ Find similar"),
+              tags$a(href = "#", onclick = sprintf(
+                "Shiny.setInputValue('add_compare','%s',{priority:'event'});return false;", r$code),
+                "+ Compare"),
+              tags$a(href = build_realestate_url(nm, abbr), target = "_blank",
+                     rel = "noopener noreferrer", "→ realestate.com.au"))),
+          if (!is.null(summary_lookup[[r$code]]))
+            tags$div(style = "font-size:12px;color:#555;margin-top:3px;", summary_lookup[[r$code]]),
+          tags$div(class = "crit-vals",
+                   lapply(crit_values_for(r$code), function(v) tags$span(class = "crit-val", v))))
+      }))
+  }
+
+  # Bookmarking: keep the criteria and their settings in shared links.
+  onBookmark(function(state) {
+    state$values$crits <- lapply(crits(), function(s) {
+      pre <- paste0("crit_", s$id)
+      list(choice = s$choice, range = input[[paste0(pre, "_range")]],
+           months = input[[paste0(pre, "_months")]], cats = input[[paste0(pre, "_cats")]])
+    })
+  })
+  onRestored(function(state) {
+    for (c0 in state$values$crits %||% list())
+      add_crit(make_crit_spec(c0$choice), init = c0)
+  })
+
   # ===== Dream-suburb mode ================================================
   # Dream mode is chosen with the mode switch; the four theme pickers sit
   # inline under the search line. dream_refs_active() holds the blend while
@@ -3391,8 +3959,9 @@ server <- function(input, output, session) {
       clearGroup("sa4") |> clearGroup("clickpop") |> clearControls()
     
     if (is.null(d) || nrow(d) == 0) {
-      if (!identical(isolate(input$app_mode), "dream") ||
-          !is.null(isolate(dream_refs_active())))
+      if (identical(isolate(input$app_mode), "similar") ||
+          (identical(isolate(input$app_mode), "dream") &&
+           !is.null(isolate(dream_refs_active()))))
         showNotification("No suburbs to show. Trying widening the region selection or changing settings.", type = "warning")
       return()
     }
@@ -3888,6 +4457,7 @@ server <- function(input, output, session) {
   }
 
   output$list_view <- renderUI({
+    if (identical(input$app_mode, "criteria")) return(criteria_list_ui())
     d <- match_df()
     if (identical(input$app_mode, "dream") && is.null(dream_refs_active())) {
       return(tags$div(
@@ -4206,6 +4776,14 @@ server <- function(input, output, session) {
   }, ignoreNULL = FALSE, ignoreInit = TRUE)
 
   output$map_side_panel <- renderUI({
+    if (identical(input$app_mode, "criteria")) {
+      tb   <- criteria_table()
+      code <- clicked_suburb() %||% (if (!is.null(tb) && nrow(tb)) tb$code[1])
+      if (is.null(code)) return(tags$div(style = "padding: 12px; color: #888; font-size: 13px;",
+        "Add criteria above; matching suburbs appear on the map. Click one to see its profile."))
+      return(build_profile_panel(code, ref_codes = character(0), show_header = TRUE,
+                                 anchor_text = anchor_note(code, anchor_state())))
+    }
     code <- clicked_suburb() %||% active_ref_codes()[1]
     if (is.null(code)) {
       return(tags$div(style = "padding: 12px; color: #888; font-size: 13px;",
@@ -4261,7 +4839,9 @@ server <- function(input, output, session) {
     cdf <- match_df()
     row <- if (!is.null(cdf)) cdf[cdf$suburb_b == code, , drop = FALSE] else NULL
 
-    html <- if (!is.null(row) && nrow(row) == 1) {
+    html <- if (identical(input$app_mode, "criteria")) {
+      crit_popup(code)
+    } else if (!is.null(row) && nrow(row) == 1) {
       raw_cols <- grep("^raw_", names(row), value = TRUE)
       active_dims <- names(settings_active())
       raw_cols <- raw_cols[sub("^raw_", "", raw_cols) %in% active_dims]
