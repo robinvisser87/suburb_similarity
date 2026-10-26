@@ -867,7 +867,7 @@ build_compare_charts <- function(ref_codes, other_codes) {
 anchor_radius_choices   <- c("10 km" = "10", "20 km" = "20",
                              "40 km" = "40", "80 km" = "80")
 anchor_strength_choices <- c("A little" = "little", "Normal" = "normal",
-                             "Strong" = "strong")
+                             "A lot" = "strong")
 anchor_strength_beta    <- c(little = 0.5, normal = 1, strong = 2)
 anchor_max              <- 3
 anchor_colour           <- "#D6336C"
