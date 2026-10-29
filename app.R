@@ -2408,8 +2408,10 @@ server <- function(input, output, session) {
   top_n_active    <- reactiveVal(50)
   region_filter   <- reactiveVal(default_tree_selection)
   # Server-side source of truth for the "Zoom to" mode, kept in sync with
-  # the map_zoom dropdown but read directly (no UI round-trip) so the
-  # auto-fit check below can never race against a stale/unset input$map_zoom.
+  # the map_zoom_to dropdown but read directly (no UI round-trip) so the
+  # auto-fit check below can never race against a stale/unset input.
+  # (Not "map_zoom": leaflet itself reports the map's zoom level as
+  # input$map_zoom, which used to switch auto-fit off after any zoom.)
   zoom_mode       <- reactiveVal("auto")
   last_fit        <- reactiveVal(NULL)   # last auto-fit bounds (xmin, ymin, xmax, ymax)
   map_fit_top_n   <- 5                   # auto zoom fits to this many top matches
@@ -2728,7 +2730,7 @@ server <- function(input, output, session) {
   # the app loads from a bookmarked URL. Excludes noisy/ephemeral inputs.
   setBookmarkExclude(c(
     "map_click", "map_marker_click", "map_shape_click",
-    "map_bounds", "map_center", "map_zoom_event",
+    "map_bounds", "map_center", "map_zoom", "map_zoom_event", "map_zoom_to",
     "set_ref", "open_settings", "apply_settings", "reset_settings",
     "open_methodology",
     "clear_filters_empty", "show_info", "chip_remove", "add_compare", "dream_example",
@@ -2800,7 +2802,7 @@ server <- function(input, output, session) {
       # for a different search. Reset server-side state immediately (no
       # round-trip lag) and mirror it in the dropdown for the UI to match.
       zoom_mode("auto")
-      updateSelectInput(session, "map_zoom", selected = "auto")
+      updateSelectInput(session, "map_zoom_to", selected = "auto")
     }
   }, ignoreInit = TRUE, ignoreNULL = FALSE)
 
@@ -3936,16 +3938,16 @@ server <- function(input, output, session) {
 
   output$map_zoom_dropdown <- renderUI({
     states <- states_in_filter(region_filter())
-    selectInput("map_zoom", "Zoom to:",
+    selectInput("map_zoom_to", "Zoom to:",
       choices  = c("Auto (fit results)" = "auto",
                    "Australia"          = "australia",
                    setNames(states, states)),
       selected = isolate(zoom_mode()))
   })
 
-  observeEvent(input$map_zoom, {
+  observeEvent(input$map_zoom_to, {
     #req(input$map_bounds)
-    z <- input$map_zoom %||% "auto"
+    z <- input$map_zoom_to %||% "auto"
     zoom_mode(z)   # keep the server-side source of truth in sync
     if (z == "auto") {
       d <- map_data()
