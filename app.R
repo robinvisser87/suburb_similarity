@@ -1976,12 +1976,18 @@ ui <- function(request) fluidPage(
     // list card), so switching suburbs or scrolling the list keeps the same
     // theme in view.
 
-    // Mode switch: tag <body> with the current mode so CSS can hide the
-    // Similar-only reference picker in Dream mode.
+    // Mode switch: tag <body> with the current mode so CSS can hide
+    // mode-specific pieces (e.g. the reference picker in Dream and Find by
+    // criteria). Every mode class is removed first, so switching back from
+    // any mode restores what it hid. Also applied on connect, from the
+    // radio buttons' current state, so a bookmarked URL starts right.
+    var stModes = 'mode-similar mode-dream mode-criteria mode-compare';
+    function stSetMode(v) { if (v) $('body').removeClass(stModes).addClass('mode-' + v); }
     $(document).on('shiny:inputchanged', function(e) {
-      if (e.name === 'app_mode')
-        $('body').removeClass('mode-similar mode-dream mode-compare')
-                 .addClass('mode-' + e.value);
+      if (e.name === 'app_mode') stSetMode(e.value);
+    });
+    $(document).on('shiny:connected', function() {
+      stSetMode($('input[name=app_mode]:checked').val());
     });
     // Re-fit the map after it becomes visible again (see map_refit on the
     // server): resize Leaflet to its now-visible container first.
@@ -2414,13 +2420,15 @@ server <- function(input, output, session) {
   # input$map_zoom, which used to switch auto-fit off after any zoom.)
   zoom_mode       <- reactiveVal("auto")
   last_fit        <- reactiveVal(NULL)   # last auto-fit bounds (xmin, ymin, xmax, ymax)
-  map_fit_top_n   <- 10                   # auto zoom fits to this many top matches
+  map_fit_top_n   <- 5                   # auto zoom fits to this many top matches
 
   # Which top-level page is showing: "main" (search/map/list) or
   # "compare" (the suburb-comparison page). A separate page, not a
   # view_mode value, since Compare has its own reference/others pickers
   # and doesn't share the main search's results.
-  page_mode <- reactiveVal("main")
+  # Derived from the mode switch (not set in an observer), so a bookmarked
+  # Compare link opens on the Compare page too.
+  page_mode <- reactive(if (identical(input$app_mode, "compare")) "compare" else "main")
   output$page_is_main    <- reactive({ page_mode() == "main" })
   output$page_is_compare <- reactive({ page_mode() == "compare" })
   outputOptions(output, "page_is_main",    suspendWhenHidden = FALSE)
@@ -2429,7 +2437,6 @@ server <- function(input, output, session) {
   # The mode switch drives which page shows. Entering Compare pre-fills its
   # reference with the current search reference if it's still empty.
   observeEvent(input$app_mode, {
-    page_mode(if (identical(input$app_mode, "compare")) "compare" else "main")
     if (identical(input$app_mode, "compare") && !length(input$compare_refs))
       updateVirtualSelect(session = session, inputId = "compare_refs",
                           selected = current_ref())
@@ -2768,13 +2775,13 @@ server <- function(input, output, session) {
   onRestored(function(state) {
     # After UI is rebuilt, sync inputs back to match the restored state
     # (some widgets need an explicit update to display the right value).
-    updateVirtualSelect(session, "ref_sub", selected = current_ref())
+    updateVirtualSelect(session = session, inputId = "ref_sub", selected = current_ref())
     if (length(state$input$anchor_sub))
-      updateVirtualSelect(session, "anchor_sub", selected = state$input$anchor_sub)
+      updateVirtualSelect(session = session, inputId = "anchor_sub", selected = state$input$anchor_sub)
     for (id in c(paste0("dream_", names(dream_theme_dims), "_refs"),
                  "compare_refs", "compare_others"))
       if (length(state$input[[id]]))
-        updateVirtualSelect(session, id, selected = state$input[[id]])
+        updateVirtualSelect(session = session, inputId = id, selected = state$input[[id]])
     updateNumericInput(session, "top_n_input_inline", value = top_n_active())
     updatePickerInput(session, "cat_coast_pick",   selected = cat_coast_filter())
     updatePickerInput(session, "cat_terrain_pick", selected = cat_terrain_filter())
@@ -4966,7 +4973,7 @@ server <- function(input, output, session) {
     allowed <- max(0, 10 - n_ref)
     others <- input$compare_others %||% character(0)
     if (length(others) > allowed) {
-      updateVirtualSelect(session, "compare_others",
+      updateVirtualSelect(session = session, inputId = "compare_others",
                           selected = head(others, allowed))
     }
   }, ignoreInit = TRUE)
