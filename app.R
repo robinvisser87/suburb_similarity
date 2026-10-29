@@ -153,12 +153,25 @@ r2 <- arrow::S3FileSystem$create(
   endpoint_override = Sys.getenv("R2_ENDPOINT"),
   scheme = "https"
 )
+# Read a parquet from R2 with one retry. Startup data the app can't run
+# without fails with a clear message naming the file (shown in the Posit
+# logs), rather than a bare arrow/S3 error.
+read_r2_parquet <- function(path, what = path, retries = 1) {
+  for (i in 0:retries) {
+    out <- tryCatch(read_parquet(r2_path(path)), error = function(e) e)
+    if (!inherits(out, "error")) return(out)
+    if (i < retries) Sys.sleep(1)
+  }
+  stop(sprintf("Couldn't load %s (%s) from cloud storage: %s",
+               what, path, conditionMessage(out)), call. = FALSE)
+}
+
 # Helper: build R2 paths rooted at the bucket so call sites stay short.
 r2_path <- function(...) {
   r2$path(paste(Sys.getenv("R2_BUCKET"), ..., sep = "/"))
 }
 
-ref        <- read_parquet(r2_path("other/ref_suburb_sa4.parquet")) |>
+ref        <- read_r2_parquet("other/ref_suburb_sa4.parquet", "suburb names") |>
   as_tibble() |>
   mutate(suburb_code_2021 = as.character(suburb_code_2021))
 # Shapefiles stay as local-repo reads. They're committed alongside the
@@ -180,7 +193,7 @@ local({
 
 # Per-suburb categorical labels used for inline filters in the title row.
 # Has columns: suburb_code_2021, cat_remote, cat_terrain, cat_coast.
-suburb_filters <- read_parquet(r2_path("other/suburb_filters.parquet")) |>
+suburb_filters <- read_r2_parquet("other/suburb_filters.parquet", "suburb filters") |>
   as_tibble() |>
   mutate(across(c(cat_remote, suburb_code_2021, cat_terrain, cat_coast), as.character)) 
 
@@ -237,7 +250,7 @@ gcc_lookup_full   <- setNames(ref$gcc_name_2021,   ref$suburb_code_2021)
 # suburb_code_2021. Built once offline and saved as a single parquet file,
 # faster startup than fourteen separate qreads + full_joins, and ready for
 # direct read from object storage (R2 / S3) when the app is deployed there.
-suburb_info <- arrow::read_parquet(r2_path("explanatory/suburb_info.parquet")) |>
+suburb_info <- read_r2_parquet("explanatory/suburb_info.parquet", "suburb information") |>
   as_tibble() |>
   mutate(suburb_code_2021 = as.character(suburb_code_2021))
 
@@ -273,8 +286,7 @@ region_tree <- ref |>
 
 # ===== Suburb profile panel: sentence + charts ============================
 # Replaces the old text-box info panel in the map side panel and list view.
-# Also drives the Compare page (build_compare_charts). build_info_panel()
-# above is no longer called anywhere and can be deleted.
+# Also drives the Compare page (build_compare_charts).
 #
 # Data:
 #   explanatory/suburb_summary.parquet  one summary_highlight sentence per suburb
@@ -285,13 +297,13 @@ region_tree <- ref |>
 # there are no charting dependencies. Styles live in the .st-* CSS block in
 # the UI head; tab switching is the small stApplyTabs() script there too.
 
-suburb_summary <- arrow::read_parquet(r2_path("explanatory/suburb_summary.parquet")) |>
+suburb_summary <- read_r2_parquet("explanatory/suburb_summary.parquet", "suburb summaries") |>
   as_tibble() |>
   mutate(suburb_code_2021 = as.character(suburb_code_2021))
 summary_lookup <- setNames(suburb_summary$summary_highlight,
                            suburb_summary$suburb_code_2021)
 
-chart_data <- arrow::read_parquet(r2_path("explanatory/chart_data.parquet")) |>
+chart_data <- read_r2_parquet("explanatory/chart_data.parquet", "chart data") |>
   as_tibble() |>
   transmute(code     = as.character(suburb_code_2021),
             sub      = as.character(subdimension),
@@ -606,7 +618,7 @@ st_pct_chart <- function(spec, ser, val_label = NULL) {
   if (!length(rows)) return(st_nodata)
   paste0(paste(rows, collapse = ""),
          '<div class="', if (is.null(val_label)) "st-axis st-axis-nov" else "st-axis",
-         '"><span></span><span>national percentile</span></div>')
+         '"><span></span><span class="st-axis-scale"><span>0</span><span>national percentile</span><span>100</span></span></div>')
 }
 
 # Shared SVG frame for the two monthly charts.
@@ -761,8 +773,12 @@ st_empty_rows <- tibble(sub = character(), category = character(),
 # ref_codes:  the active reference suburb(s)
 # The displayed suburb is drawn as the blue "selected" series unless it is
 # the only reference, in which case the charts show reference vs Australia.
+# theme_refs (Dream mode): a list of reference codes per theme
+# (people / urban / nature). Each tab then compares against that theme's
+# picks only, instead of the mean of every pick.
 build_profile_panel <- function(code, ref_codes, show_header = TRUE,
-                                show_hint = TRUE, anchor_text = NULL) {
+                                show_hint = TRUE, anchor_text = NULL,
+                                theme_refs = NULL) {
   ref_codes <- unique(ref_codes[!is.na(ref_codes)])
   name   <- suburb_code_to_name[[code]] %||% code
   abbr   <- suburb_code_to_abbr[[code]] %||% ""
@@ -785,6 +801,28 @@ build_profile_panel <- function(code, ref_codes, show_header = TRUE,
     if (show_sel) list(list(label = sel_label, col = st_col_sel, d = sel)))
   val_label <- if (show_sel) sel_label else ref_label
 
+  tab_ser <- NULL
+  if (!is.null(theme_refs)) {
+    show_sel <- TRUE; is_ref <- FALSE
+    sel <- zero_fill(suburb_series(code)) %||% st_empty_rows
+    sel_has_census <- any(sel$sub %in% c("Age", "Dwelling type"))
+    val_label <- sel_label
+    sel_ser <- list(label = sel_label, col = st_col_sel, d = sel)
+    tab_ser <- lapply(setNames(nm = names(profile_tabs)), function(tab) {
+      rdt <- profile_ref_data(unique(theme_refs[[tab]] %||% character(0)))
+      if (!rdt$n) return(list(ser = list(sel_ser), agg = st_empty_rows))
+      lab <- if (rdt$n == 1) paste(ref_name(rdt$codes[1]), "(dream pick)")
+             else sprintf("Dream picks (mean of %d)", rdt$n)
+      list(ser = list(list(label = lab, col = st_col_ref, d = rdt$agg,
+                           each = rdt$each, band = rdt$n > 1), sel_ser),
+           agg = rdt$agg)
+    })
+    ser <- c(list(list(label = "Your dream pick for that theme", col = st_col_ref)),
+             list(sel_ser))
+  }
+  chart_tab <- setNames(rep(names(profile_tabs), vapply(profile_tabs, function(t) length(t$charts), 1L)),
+                        unlist(lapply(profile_tabs, `[[`, "charts")))
+
   header <- if (show_header) {
     tags$div(class = "st-head",
       tags$span(class = "st-name", sel_label),
@@ -806,6 +844,10 @@ build_profile_panel <- function(code, ref_codes, show_header = TRUE,
   card_fn <- function(id) {
     spec <- profile_charts[[id]]
     if (show_sel && !nrow(st_pick(sel, spec$subs))) return("")
+    if (!is.null(tab_ser)) {
+      ts <- tab_ser[[chart_tab[[id]]]]
+      return(st_card_for(id, ts$ser, ts$agg, val_label))
+    }
     st_card_for(id, ser, ref_agg, val_label)
   }
   note_fn <- function(tab, any_cards) {
@@ -984,16 +1026,16 @@ compact_regions <- function(sel) {
 #                shares and percentiles 0-100, degrees C, mm per month)
 #   filter_meta  one row per metric: label, unit, slider range, AUS p25/50/75
 #   filter_hist  30-bin counts per metric, for the histogram behind a slider
-filter_wide <- read_parquet(r2_path("explanatory/filter_wide.parquet")) |>
+filter_wide <- read_r2_parquet("explanatory/filter_wide.parquet", "criteria data") |>
   as.data.frame() |>
   mutate(suburb_code_2021 = as.character(suburb_code_2021))
-filter_meta <- read_parquet(r2_path("explanatory/filter_meta.parquet")) |>
+filter_meta <- read_r2_parquet("explanatory/filter_meta.parquet", "criteria metadata") |>
   as_tibble() |>
   mutate(theme = recode(theme,
                         "People & Culture"       = "People & diversity",
                         "Nature & Climate"       = "Nature & climate",
                         "Urban Fabric & Economy" = "Urban fabric & economy"))
-filter_hist <- read_parquet(r2_path("explanatory/filter_hist.parquet")) |>
+filter_hist <- read_r2_parquet("explanatory/filter_hist.parquet", "criteria histograms") |>
   as_tibble() |> arrange(col_key, bin)
 filter_hist_by_key <- split(filter_hist$n, filter_hist$col_key)
 filter_meta_by_key <- split(filter_meta, filter_meta$col_key)
@@ -1020,6 +1062,28 @@ crit_seasons <- list(Summer = c("Dec", "Jan", "Feb"), Autumn = c("Mar", "Apr", "
                      `All year` = month.abb)
 crit_weather_keys <- function(var, months)
   paste0(crit_weather[[var]]$prefix, "__", tolower(months))
+
+# One-click preset sets for Find by criteria. Each item is a picker choice
+# plus initial settings; range = c(lo, hi), NA = leave that end at its limit.
+crit_presets <- list(
+  `Mild winters` = list(
+    list(choice = "w:tmin", months = c("Jun", "Jul", "Aug"), range = c(7, NA))),
+  `Warm, not hot summers` = list(
+    list(choice = "w:tmax", months = c("Dec", "Jan", "Feb"), range = c(23, 29))),
+  `Leafy & well-educated` = list(
+    list(choice = "g:Educational attainment", range = c(35, NA),
+         cats = c("educational_attainment__bachelor_degree",
+                  "educational_attainment__postgraduate_degree")),
+    list(choice = "g:Vegetation", range = c(15, NA),
+         cats = c("vegetation__eucalypt_open_forests", "vegetation__eucalypt_tall_open_forests",
+                  "vegetation__eucalypt_woodlands", "vegetation__rainforests_and_vine_thickets"))),
+  `Young families` = list(
+    list(choice = "m:age__children_0_14", range = c(22, NA)),
+    list(choice = "m:dwelling_type__separate_house", range = c(70, NA))),
+  `Lower housing costs` = list(
+    list(choice = "m:weekly_rent", range = c(NA, 40)),
+    list(choice = "m:monthly_mortgage", range = c(NA, 40)))
+)
 
 # "Add a criterion" picker: grouped by theme and subdimension. Values:
 #   m:<col_key>  one metric     w:<tmax|tmin|rain>  weather by month
@@ -1084,9 +1148,21 @@ crit_hist_html <- function(counts, smin, smax, rng, ticks, unit) {
 # ===== Helpers ============================================================
 
 # Load all raw_* for one reference suburb 
+# Similarity scores for one reference suburb. Retries once; on failure
+# shows a notification (inside a session) and returns NULL, and callers
+# drop that reference instead of the whole app erroring.
 load_raw <- function(code) {
-  read_parquet(r2_path("similarity/by_source", paste0(code, ".parquet"))) |>
-    as_tibble()
+  path <- paste0("similarity/by_source/", code, ".parquet")
+  for (i in 0:1) {
+    out <- tryCatch(read_parquet(r2_path(path)), error = function(e) e)
+    if (!inherits(out, "error")) return(as_tibble(out))
+    if (i == 0) Sys.sleep(1)
+  }
+  nm <- suburb_code_to_name[[code]] %||% code
+  try(showNotification(
+    sprintf("Couldn't load similarity data for %s. Please try again shortly.", nm),
+    type = "error", duration = 8), silent = TRUE)
+  NULL
 }
 
 # Dream-suburb variant: takes a list with elements `people`, `urban`,
@@ -1095,7 +1171,9 @@ compute_dream_raw <- function(theme_refs) {
   all_refs <- unique(unlist(theme_refs))
   if (!length(all_refs)) return(NULL)
   
-  raw_per_ref <- setNames(lapply(all_refs, load_raw), all_refs)
+  raw_per_ref <- compact(setNames(lapply(all_refs, load_raw), all_refs))
+  if (!length(raw_per_ref)) return(NULL)
+  theme_refs  <- lapply(theme_refs, intersect, names(raw_per_ref))
   
   dim_tables <- list()
   for (theme in names(theme_refs)) {
@@ -1376,193 +1454,6 @@ build_popup_low_pop <- function(name, abbr) sprintf(
   "<b>%s, %s</b><br><i>Not enough data to compare this suburb.</i>",
   name, abbr)
 
-# ===== Suburb info panel ==================================================
-
-# NA-safe formatters for the info panel
-fmt_na   <- function(x) if (is.null(x) || length(x) == 0 || is.na(x)) "\u2014" else as.character(x)
-fmt_num  <- function(x, digits = 0, suffix = "") {
-  if (is.null(x) || length(x) == 0 || is.na(x)) return("\u2014")
-  paste0(formatC(round(x, digits), format = "f", digits = digits,
-                 big.mark = ","), suffix)
-}
-fmt_dollar <- function(x) {
-  if (is.null(x) || length(x) == 0 || is.na(x)) return("\u2014")
-  paste0("$", formatC(round(x), format = "d", big.mark = ","))
-}
-fmt_percentile <- function(x) {
-  # x is 0-100. 2021 Census dollar figures are stale by 2026, but a
-  # suburb's national rank is not, since every suburb was measured in the
-  # same 2021 dollars, so percentile is shown instead of a $ amount.
-  if (is.null(x) || length(x) == 0 || is.na(x)) return("\u2014")
-  n <- round(x)
-  suffix <- if (n %% 10 == 1 && n %% 100 != 11) "st"
-    else if (n %% 10 == 2 && n %% 100 != 12) "nd"
-    else if (n %% 10 == 3 && n %% 100 != 13) "rd"
-    else "th"
-  paste0(n, suffix, " percentile (national)")
-}
-
-# One labelled fact line inside a group
-info_fact <- function(label, value) {
-  tags$div(style = "display:flex; justify-content:space-between; gap:8px;
-                    font-size:12px; padding:1.5px 0;",
-    tags$span(style = "color:#9CA3AF; font-size:11px;", label),
-    tags$span(style = "text-align:right; font-weight:600; color:#333333;",
-              value))
-}
-
-# A titled group of facts (renders as a card in the panel grid)
-info_group <- function(title, ..., note = NULL, collapsible = FALSE, group_id = NULL) {
-  content <- tagList(...,
-    if (!is.null(note))
-      tags$div(style = "font-size:10px; color:#aaa; margin-top:4px;
-                        font-style:italic;", note))
-
-  card_style <- "flex: 1 1 150px; min-width: 140px; max-width: 240px;
-                border: 1px solid #e8e8e8; border-radius: 6px;
-                padding: 6px 8px; background: #fcfcfc;"
-
-  if (!collapsible) {
-    tags$div(style = card_style,
-      tags$div(style = "font-size:10px; font-weight:600; color:#999;
-                        text-transform:uppercase; letter-spacing:0.5px;
-                        margin-bottom:3px;", title),
-      content)
-  } else {
-    tid <- paste0("infogrp-", group_id %||% gsub("[^a-zA-Z0-9]", "", title))
-    tags$div(style = card_style,
-      tags$div(
-        onclick = sprintf(
-          "var el=document.getElementById('%s');
-           var open = el.style.display !== 'none';
-           el.style.display = open ? 'none' : 'block';
-           this.querySelector('.infogrp-caret').textContent = open ? '\u25b8' : '\u25be';",
-          tid),
-        style = "cursor:pointer; display:flex; align-items:center; gap:5px;
-                 font-size:10px; font-weight:600; color:#999;
-                 text-transform:uppercase; letter-spacing:0.5px;
-                 margin-bottom:3px;",
-        tags$span(class = "infogrp-caret",
-                  style = "font-size:8px; width:8px;", "\u25be"),
-        title),
-      tags$div(id = tid, style = "display:block;", content))
-  }
-}
-
-# Full info panel for one suburb. When `show_header = FALSE` the suburb
-# name / hint is omitted (e.g. used inline in list cards where the card
-# header already carries that information).
-# `groups` defaults to all 9. Pass a subset (e.g. c("Place","People",
-# "Housing","Work")) to render a slimmer panel suitable for inline use in
-# list cards.
-build_info_panel <- function(code, ref_code = NULL, show_header = TRUE,
-                              groups = c("Place", "Climate", "Landscape",
-                                         "People", "Diversity", "Housing",
-                                         "Socioeconomic", "Work", "Voting"),
-                              collapsible = FALSE) {
-  d <- get_info(code)
-  name <- suburb_code_to_name[[code]] %||% code
-  abbr <- suburb_code_to_abbr[[code]] %||% ""
-
-  if (is.null(d)) {
-    return(tags$div(style = "padding: 12px; color: #888; font-size: 13px;",
-      sprintf("No detailed information available for %s, %s.", name, abbr)))
-  }
-
-  is_ref <- !is.null(ref_code) && length(ref_code) > 0 && code %in% ref_code
-
-  header <- if (show_header) {
-    tags$div(style = "display:flex; align-items:baseline; gap:10px;
-                      flex-wrap:wrap; margin-bottom:8px;",
-      tags$span(style = "font-size:16px; font-weight:bold;",
-                sprintf("%s, %s", name, abbr)),
-      tags$span(style = "font-size:11px; color:#999;",
-                if (is_ref) "Current reference suburb"
-                else "click any suburb on the map to update"))
-  } else NULL
-
-  # group_id is prefixed with the suburb code so collapse/expand toggles
-  # stay independent when multiple suburbs' panels are on the same page
-  # at once (e.g. the Compare page), rather than colliding on the group
-  # name alone.
-  gid <- function(name) paste0(code, "_", name)
-
-  # Build groups as a named list, then keep only those requested. This keeps
-  # the source of truth (what each group contains) in one place while letting
-  # callers choose which ones to render.
-  all_groups <- list(
-    Place = info_group("Place", collapsible = collapsible, group_id = gid("place"),
-      info_fact("Remoteness",  fmt_na(d$remoteness)),
-      info_fact("Density",     fmt_num(d$density, 0, " /km\u00b2")),
-      info_fact("Coast",       fmt_na(d$coast_class)),
-      info_fact("To coast",    fmt_num(d$dist_to_coast_km, 0, " km")),
-      info_fact("Terrain",     fmt_na(d$dominant_slope_class)),
-      info_fact("Elevation",   fmt_na(d$dominant_elev_class))),
-
-    Climate = info_group("Climate", collapsible = collapsible, group_id = gid("climate"),
-      info_fact("Avg max temp",  fmt_num(d$tmax_annual, 1, "\u00b0C")),
-      info_fact("Avg min temp",  fmt_num(d$tmin_annual, 1, "\u00b0C")),
-      info_fact("Avg monthly rain", fmt_num(d$annual_rain, 0, " mm")),
-      info_fact("Wettest month", fmt_na(d$peak_rain_month)),
-      info_fact("Driest month",  fmt_na(d$driest_month))),
-
-    Landscape = info_group("Landscape", collapsible = collapsible, group_id = gid("landscape"),
-      info_fact("Setting",        fmt_na(d$landscape_type)),
-      info_fact("Natural veg",    fmt_num(d$pct_natural_veg_landcover, 0, "%")),
-      info_fact("Dominant veg",   fmt_na(d$dominant_vegetation)),
-      info_fact("Water",          fmt_na(d$water_character))),
-
-    People = info_group("People", collapsible = collapsible, group_id = gid("people"),
-      info_fact("Population",  fmt_num(d$population, 0)),
-      info_fact("Median age",  fmt_num(d$median_age, 0)),
-      info_fact("Age profile", fmt_na(d$age_archetype)),
-      info_fact("Households",  fmt_na(d$household_archetype))),
-
-    Diversity = info_group("Diversity", collapsible = collapsible, group_id = gid("diversity"),
-      info_fact("Birthplace",   fmt_na(d$diversity_archetype)),
-      info_fact("Top region",   sprintf("%s (%s)",
-                  fmt_na(d$dominant_region),
-                  fmt_num(d$pct_dominant_region, 0, "%"))),
-      info_fact("Indigenous",   fmt_num(d$pct_indigenous, 1, "%")),
-      info_fact("Religion",     fmt_na(d$religion_archetype))),
-
-    Housing = info_group("Housing", collapsible = collapsible, group_id = gid("housing"),
-      info_fact("Tenure",          fmt_na(d$tenure_archetype)),
-      info_fact("Dwellings",       fmt_na(d$dwelling_archetype)),
-      info_fact("Typical size",    fmt_na(d$dominant_bedrooms)),
-      info_fact("Mortgage repayments", fmt_percentile(d$mortgage_percentile)),
-      info_fact("Rent",                fmt_percentile(d$rent_percentile))),
-
-    Socioeconomic = info_group("Socioeconomic", collapsible = collapsible, group_id = gid("socioeconomic"),
-      info_fact("Income",      fmt_na(d$income_archetype)),
-      info_fact("Household income", fmt_percentile(d$income_percentile)),
-      info_fact("Education",   fmt_na(d$education_archetype)),
-      info_fact("Labour force", fmt_na(d$lfs_archetype))),
-
-    Work = info_group("Work", collapsible = collapsible, group_id = gid("work"),
-      info_fact("Economy",     fmt_na(d$economy_type)),
-      info_fact("Workforce",   fmt_na(d$workforce_character)),
-      tags$div(style = "font-size:11px; color:#777; margin-top:3px;",
-               tags$span(style = "color:#999;", "Top industries: "),
-               fmt_na(d$top3_industries))),
-
-    Voting = info_group("Voting", collapsible = collapsible, group_id = gid("voting"),
-      info_fact("Lean",        fmt_na(d$lean_category)),
-      info_fact("Leading party '25", fmt_na(d$dominant_party_2025)),
-      note = "Booth-level where available, otherwise electorate-level")
-  )
-
-  chosen <- all_groups[intersect(groups, names(all_groups))]
-
-  tags$div(
-    style = if (show_header) {
-      "border: 1px solid #ddd; border-radius: 8px; padding: 12px 14px; background: white;"
-    } else "",
-    header,
-    tags$div(style = "display:flex; flex-wrap:wrap; gap:8px;", chosen)
-  )
-}
-
 # ===== Suburb comparison table (Compare page) =============================
 # Builds the Overall/theme/dimension grid for the comparison page. Rows:
 # "Overall match", then one row per theme (each expandable to reveal its
@@ -1624,9 +1515,9 @@ build_compare_table <- function(ref_codes, other_codes, compare_df, selected_dim
   overall_row <- row_of(
     tags$b("Overall match"),
     function(code, is_ref) {
-      if (is_ref) return(tags$span(style = "color:#aaa;", "\u2014"))
+      if (is_ref) return(tags$span(style = "color:#aaa;", "\u2013"))
       r <- get_row(code)
-      if (is.null(r)) tags$span(style = "color:#aaa;", "\u2014")
+      if (is.null(r)) tags$span(style = "color:#aaa;", "\u2013")
       else tags$b(sprintf("%.1f%%", r$match * 100))
     },
     extra_style = "font-size:12px;")
@@ -1638,7 +1529,7 @@ build_compare_table <- function(ref_codes, other_codes, compare_df, selected_dim
               sprintf("Distance to %s",
                       paste(vapply(anchor$codes, anchor_name, ""), collapse = " / "))),
     function(code, is_ref) {
-      if (is_ref) return(tags$span(style = "color:#aaa;", "\u2014"))
+      if (is_ref) return(tags$span(style = "color:#aaa;", "\u2013"))
       if (code %in% anchor$codes) return(tags$span(style = "color:#555;", "anchor"))
       d <- anchor_dist_matrix(code, anchor$codes)[1, ]
       tags$span(style = "color:#555;", paste(fmt_km(d), collapse = " / "))
@@ -1675,10 +1566,10 @@ build_compare_table <- function(ref_codes, other_codes, compare_df, selected_dim
             theme_group_colours[[theme_id]]),
           dream_theme_labels[[theme_id]])),
       function(code, is_ref) {
-        if (is_ref) return(tags$span(style = "color:#aaa;", "\u2014"))
+        if (is_ref) return(tags$span(style = "color:#aaa;", "\u2013"))
         if (!length(dims)) return(tags$span(style = "color:#ccc;", "off"))
         v <- theme_score(code)
-        if (is.na(v)) tags$span(style = "color:#aaa;", "\u2014")
+        if (is.na(v)) tags$span(style = "color:#aaa;", "\u2013")
         else tags$b(style = "font-size:12.5px; color:#222222;",
                     sprintf("%.1f%%", v * 100))
       },
@@ -1695,11 +1586,11 @@ build_compare_table <- function(ref_codes, other_codes, compare_df, selected_dim
                      dim_colors[[d]]), NULL),
                    dim_labels[[d]]),
           function(code, is_ref) {
-            if (is_ref) return(tags$span(style = "color:#ccc;", "\u2014"))
+            if (is_ref) return(tags$span(style = "color:#ccc;", "\u2013"))
             r <- get_row(code)
             col <- paste0("score_", d)
             if (is.null(r) || !col %in% names(r) || is.na(r[[col]][1])) {
-              tags$span(style = "color:#ccc;", "\u2014")
+              tags$span(style = "color:#ccc;", "\u2013")
             } else tags$span(style = "color:#9CA3AF; font-weight:400;",
                              sprintf("%.1f%%", r[[col]][1] * 100))
           })
@@ -1753,7 +1644,7 @@ build_comparison_strip <- function(ref_vals, match_info) {
         if (same) "#33691e" else "#666"),
       title = if (same) sprintf("%s: same as reference (%s)", lbl, mv)
               else      sprintf("%s: %s (reference: %s)", lbl, mv,
-                                if (!length(rv)) "\u2014"
+                                if (!length(rv)) "\u2013"
                                 else paste(rv, collapse = " / ")),
       paste0(lbl, ": ", mv, if (same) " \u2713" else ""))
   })
@@ -1973,6 +1864,8 @@ ui <- function(request) fluidPage(
 .ch-tick.mid { width: 2px; opacity: 1; }
 .ch-legend { font-size: 10.5px; color: #999; text-align: center; margin-top: 2px; }
 .crit-empty { text-align: center; color: #666; font-size: 12.5px; padding: 8px 0 4px; }
+.crit-presets { text-align: center; font-size: 12px; color: #888; margin: 6px 0 0; }
+.crit-presets a { margin: 0 6px; font-weight: 600; white-space: nowrap; }
 .crit-empty a { margin: 0 6px; font-weight: 600; }
 .crit-res { border: 1px solid #e0e0e0; border-radius: 6px; padding: 8px 12px; margin-bottom: 8px; background: #fff; }
 .crit-res-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
@@ -2052,6 +1945,11 @@ ui <- function(request) fluidPage(
           border-radius: 50%; border: 1.5px solid #fff; box-shadow: 0 0 0 0.5px rgba(0,0,0,0.25); }
 .st-axis { display: grid; grid-template-columns: 42% 1fr 32px; gap: 6px; font-size: 9.5px; color: #aaa; margin-top: 2px; }
 .st-axis span:nth-child(2) { text-align: center; }
+.st-axis-scale { display: flex; justify-content: space-between; }
+.dream-side-head { background: #faf6ff; border: 1px solid #e4d8f5; border-radius: 6px;
+                   padding: 8px 10px; margin-bottom: 10px; font-size: 12px; }
+.dream-side-title { font-weight: 600; font-size: 14px; color: #5b2a86; margin-bottom: 4px; }
+.dream-side-head ul { margin: 0; padding-left: 16px; }
 .st-svg { width: 100%; height: auto; display: block; }
 .st-svgt { font-size: 9px; fill: #999; }
 .st-row-nov { grid-template-columns: 38% 1fr; }
@@ -2308,6 +2206,7 @@ ui <- function(request) fluidPage(
                                   "Smallest population first" = "pop_asc",
                                   "Name (A\u2013Z)" = "name",
                                   "Nearest to location" = "dist")))),
+      uiOutput("crit_presets"),
       uiOutput("crit_funnel"),
       tags$div(id = "crit-cards", class = "crit-grid"),
       uiOutput("crit_empty"))),
@@ -2415,7 +2314,8 @@ ui <- function(request) fluidPage(
     tags$div(style = "text-align: center; font-size: 11px; color: #666;
                       margin: 0 0 8px 0;",
       icon("circle-info"),
-      " Click any suburb on the map to set it as the reference.")),
+      " Click a suburb on the map for details; use ", tags$em("Set as reference"),
+      " in its popup to search from it.")),
   # View mode toggle now lives in the inputs row above. Banner here only
   # when dream-suburb mode is active, sitting above the main view.
 
@@ -2679,6 +2579,8 @@ server <- function(input, output, session) {
   # appended as commented footer lines so the CSV carries its own provenance.
   output$export_csv <- downloadHandler(
     filename = function() {
+      if (identical(input$app_mode, "criteria"))
+        return(sprintf("suburbtwin_criteria_%s.csv", format(Sys.Date(), "%Y%m%d")))
       codes <- current_ref()
       slugs <- vapply(codes, function(code) {
         nm <- unname(suburb_code_to_name[code]) %||% code
@@ -2695,6 +2597,7 @@ server <- function(input, output, session) {
       paste0(paste(slugs, collapse = "_"), ".csv")
     },
     content = function(file) {
+      if (identical(input$app_mode, "criteria")) return(write_criteria_csv(file))
       cd <- match_df()
       if (is.null(cd) || nrow(cd) == 0) {
         writeLines("# No results to export.", file); return()
@@ -2829,7 +2732,7 @@ server <- function(input, output, session) {
     "set_ref", "open_settings", "apply_settings", "reset_settings",
     "open_methodology",
     "clear_filters_empty", "show_info", "chip_remove", "add_compare", "dream_example",
-    "crit_add", "crit_add_quick", "crit_remove", "crit_season", "crit_to_group",
+    "crit_add", "crit_add_quick", "crit_preset", "crit_remove", "crit_season", "crit_to_group",
     "region_dd", "region_dd_state", "filters_dd"
   ))
 
@@ -2957,10 +2860,10 @@ server <- function(input, output, session) {
       cached <- raw_cache[[code]]
       if (is.null(cached)) {
         cached <- load_raw(code)
-        raw_cache[[code]] <- cached
+        if (!is.null(cached)) raw_cache[[code]] <- cached
       }
       cached
-    }), codes)
+    }), codes) |> compact()
   })
   
   # Per-reference medians: a named list keyed by reference code, each holding
@@ -3437,6 +3340,25 @@ server <- function(input, output, session) {
     } else NULL
   }
 
+  # The slider's top end is open (values above it pass) when it sits below the
+  # data's true maximum, e.g. shares capped at their 99th percentile: label
+  # it "35%+" so that's visible.
+  crit_slider <- function(pre, spec, val) {
+    sl <- sliderInput(paste0(pre, "_range"), NULL, min = spec$smin, max = spec$smax,
+                      value = val, step = spec$step, width = "100%", ticks = FALSE,
+                      post = switch(spec$unit, "%" = "%", "°C" = "°C", "mm" = " mm", ""))
+    open_top <- spec$type == "metric" && identical(spec$unit, "%") && spec$smax < 100
+    if (!open_top) return(sl)
+    # ion.rangeSlider's own max_postfix puts a space before the unit
+    # ("35+ %"), so patch this slider's label formatter once it exists.
+    id <- paste0(pre, "_range")
+    tagList(sl, tags$script(HTML(sprintf(
+      "(function f(n){var s=$('#%s').data('ionRangeSlider');
+        if(!s){if(n<50)setTimeout(function(){f(n+1);},100);return;}
+        s.decorate=function(t,i){var o=this.options;return t+(o.postfix||'')+(i===o.max?'+':'');};
+        s.update({});})(0);", id))))
+  }
+
   crit_card_ui <- function(spec, init = NULL) {
     id  <- spec$id; pre <- paste0("crit_", id)
     val <- init$range %||% c(spec$smin, spec$smax)
@@ -3463,9 +3385,7 @@ server <- function(input, output, session) {
                                             countSelectedText = "{0} categories",
                                             noneSelectedText = "Pick categories to add together")),
       uiOutput(paste0(pre, "_hist")),
-      sliderInput(paste0(pre, "_range"), NULL, min = spec$smin, max = spec$smax,
-                  value = val, step = spec$step, width = "100%", ticks = FALSE,
-                  post = switch(spec$unit, "%" = "%", "°C" = "°C", "mm" = " mm", "")),
+      crit_slider(pre, spec, val),
       tags$div(class = "crit-foot",
         if (spec$type == "metric" && identical(spec$unit, "%") &&
             sum(filter_meta$subdimension == spec$sub & filter_meta$valtype == "share") >= 3)
@@ -3560,6 +3480,30 @@ server <- function(input, output, session) {
     }
   }, ignoreInit = TRUE)
   observeEvent(input$crit_add_quick, add_from_choice(input$crit_add_quick))
+
+  # Presets: add their cards (alongside any existing ones).
+  preset_ok <- function(p) all(vapply(p, function(it) {
+    sp <- make_crit_spec(it$choice)
+    !is.null(sp) && (is.null(it$cats) || all(it$cats %in% sp$cats_all))
+  }, logical(1)))
+  presets_avail <- Filter(preset_ok, crit_presets)
+  output$crit_presets <- renderUI({
+    if (!length(presets_avail)) return(NULL)
+    tags$div(class = "crit-presets", "Presets:",
+      lapply(names(presets_avail), function(nm) tags$a(href = "#", onclick = sprintf(
+        "Shiny.setInputValue('crit_preset', '%s', {priority:'event'}); return false;",
+        gsub("'", "\\\\'", nm)), nm)))
+  })
+  observeEvent(input$crit_preset, {
+    p <- presets_avail[[input$crit_preset]]; if (is.null(p)) return()
+    for (it in p) {
+      sp <- make_crit_spec(it$choice); if (is.null(sp)) next
+      rng <- it$range %||% c(NA, NA)
+      rng <- c(if (is.na(rng[1])) sp$smin else max(sp$smin, rng[1]),
+               if (is.na(rng[2])) sp$smax else min(sp$smax, rng[2]))
+      add_crit(sp, init = list(range = rng, months = it$months, cats = it$cats))
+    }
+  })
 
   observeEvent(input$crit_remove, {
     id <- as.integer(input$crit_remove)
@@ -3779,8 +3723,9 @@ server <- function(input, output, session) {
     shown <- head(tb, 100)
     tagList(
       tags$div(style = "font-size: 11px; color: #666; margin-bottom: 8px;",
-               sprintf("%s suburbs meet your criteria%s.", format(nrow(tb), big.mark = ","),
-                       if (nrow(tb) > 100) "; showing the first 100" else "")),
+               sprintf("%s suburbs meet all your criteria%s. They aren't scored or ranked; use the sort menu to order them.",
+                       format(nrow(tb), big.mark = ","),
+                       if (nrow(tb) > 100) " (showing the first 100)" else "")),
       lapply(seq_len(nrow(shown)), function(i) {
         r <- shown[i, ]; nm <- r$name; abbr <- r$state %||% ""
         tags$div(class = "crit-res",
@@ -3803,6 +3748,42 @@ server <- function(input, output, session) {
           tags$div(class = "crit-vals",
                    lapply(crit_values_for(r$code), function(v) tags$span(class = "crit-val", v))))
       }))
+  }
+
+  # CSV for Find by criteria: every matching suburb with its value for each
+  # criterion (weather: lowest and highest across the chosen months), then
+  # a footer listing the criteria, region filters and location.
+  write_criteria_csv <- function(file) {
+    tb <- criteria_table()
+    if (is.null(tb) || !nrow(tb)) {
+      writeLines("# No suburbs meet the current criteria.", file); return()
+    }
+    i <- match(tb$code, fw_codes)
+    out <- tibble(suburb = tb$name, state = tb$state, suburb_code = tb$code,
+                  population = tb$population)
+    if (!all(is.na(tb$dist))) out$distance_km <- round(tb$dist, 1)
+    unit_sfx <- function(u) switch(u %||% "", "%" = " (%)", "°C" = " (°C)", "mm" = " (mm)",
+                                   "percentile" = " (national percentile)", "")
+    specs <- crits()
+    for (sp in specs) {
+      v <- crit_values(sp); if (is.null(v)) next
+      nm <- paste0(sp$short, unit_sfx(sp$unit))
+      if (is.matrix(v)) {
+        out[[paste(nm, "lowest month")]]  <- round(apply(v[i, , drop = FALSE], 1, min, na.rm = TRUE), 1)
+        out[[paste(nm, "highest month")]] <- round(apply(v[i, , drop = FALSE], 1, max, na.rm = TRUE), 1)
+      } else out[[nm]] <- round(v[i], 2)
+    }
+    out$summary <- unname(vapply(tb$code, function(cd) summary_lookup[[cd]] %||% "", ""))
+    out$homes_for_sale <- mapply(build_realestate_url, tb$name, tb$state, USE.NAMES = FALSE)
+    write_csv(out, file, na = "")
+
+    res <- criteria_result()
+    footer <- c("", "# Find by criteria (SuburbTwin)",
+                sprintf("# Exported %s; %d suburbs meet all criteria",
+                        format(Sys.Date(), "%d %b %Y"), nrow(tb)),
+                vapply(res$funnel[-1], function(f) paste0("# ", f$label), ""))
+    if (!length(res$alone)) footer <- c(footer, "# (no criteria limits set)")
+    cat(paste0(footer, "\n"), file = file, append = TRUE, sep = "")
   }
 
   # Bookmarking: keep the criteria and their settings in shared links.
@@ -3864,68 +3845,71 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$open_methodology, {
+    theme_lists <- lapply(names(dream_theme_dims), function(t)
+      tags$p(tags$b(dream_theme_labels[[t]], ": "),
+             paste(dim_labels[intersect(sort(dream_theme_dims[[t]]), names(dim_labels))],
+                   collapse = ", "), "."))
     showModal(modalDialog(
       title = "How does this work?",
       easyClose = TRUE, size = "l",
-      tags$h5("What is a match score?"),
-      tags$p("Each pair of suburbs is compared across 23 characteristics covering ",
-             "geography, environment, demographics, politics, and local amenities. ",
-             "A per-characteristic match score is computed from the underlying data ",
-             "(using Bray-Curtis or scaled-Euclidean distance, depending on the ",
-             "characteristic). A score of 1 means identical on that ",
-             "characteristic; 0 means as different as possible."),
-      tags$h5("The 23 characteristics"),
-      tags$div(style = "font-size: 12px;",
-        tags$p(tags$b("People-group: "),
-          "people (age, household composition), socioeconomic (income, ",
-          "occupation, education), voting (federal first-preference vote shares), ",
-          "diversity (country-of-birth, language, religion mixing)."),
-        tags$p(tags$b("Place-group: "),
-          "remoteness (ABS RA class), density (population per km²), ",
-          "housing (dwelling structure, tenure), employment (industry mix), ",
-          "coast (distance bands to coastline), terrain (slope, elevation), ",
-          "vegetation (cover types from Digital Earth Australia), ",
-          "water (rivers, lakes, hydrology), weather (temperature, rainfall ",
-          "grids), landcover (mesh-block land use composition), and nine ",
-          "amenity-access characteristics: public transport, health ",
-          "infrastructure, tertiary education, community infrastructure, ",
-          "cultural amenities, fresh food, dining, schools, and kinder. ",
-          "Each is measured by average distance to and count of nearby ",
-          "facilities (from OpenStreetMap).")),
-      tags$h5("How the match is calculated"),
-      tags$p("Each characteristic's raw similarity is transformed by your chosen ",
-             "target: ", tags$b("Similar"), " = peak at 1.0 (highest similarity), ",
-             tags$b("Mostly similar"), " = peak at 0.7, ",
-             tags$b("Mostly different"), " = peak at 0.3, ",
-             tags$b("Different"), " = peak at 0.0. ",
-             "Scores are computed using a triangular decay function: a perfect ",
-             "target match scores 1.0, while similarity drops off linearly the",
-             "the further a suburb deviates from your target settings."
-             ),
-      tags$p("The transformed characteristic scores are then aggregated:"),
+      tags$h5("Four ways to search"),
       tags$ul(
-        tags$li(tags$b("Balanced"), ": simple mean across all selected characteristics."),
-        tags$li(tags$b("People-focused"), ": people-group mean × 0.75 + place-group mean × 0.25."),
-        tags$li(tags$b("Place-focused"), ": opposite weighting (place × 0.75, people × 0.25).")
-      ),
-      tags$h5("Multiple reference suburbs"),
-      tags$p("When more than one reference is selected: ",
-             tags$b("Match any"), " surfaces suburbs strongly similar to any one ",
-             "of your references (best individual fit per pair). ",
-             tags$b("Balanced across all"), " surfaces suburbs moderately similar ",
-             "to every reference (mean across pairs)."),
-      tags$h5("Near a place"),
-      tags$p("Optionally, pick up to 3 suburbs to stay close to (\u201cnear a place\u201d). ",
-             "Each result's similarity is multiplied by a proximity factor that is 1 at ",
-             "the place, 0.5 at the chosen radius and close to 0 at twice the radius, ",
-             "raised to a strength setting (a little / normal / strong). Results are ",
-             "ranked by that combined score, but the match % shown stays pure ",
-             "similarity, with the straight-line distance between suburb centres ",
-             "shown alongside."),
-      tags$h5("Filters"),
-      tags$p("Category filters (Coast, Terrain, Remoteness) restrict results to ",
-             "the selected categories AND remove that characteristic from the match. ",
-             "Region filters restrict by state, GCCSA, or SA4 without affecting scoring."),
+        tags$li(tags$b("Similar suburbs"), ": pick a suburb you know; every other suburb ",
+                "gets a match score for how alike it is."),
+        tags$li(tags$b("Dream suburb"), ": mix and match, e.g. the people & diversity of ",
+                "one suburb, the urban feel of another and the nature & climate of a third. ",
+                "Suburbs are scored against that blend."),
+        tags$li(tags$b("Find by criteria"), ": set your must-haves directly (e.g. winter ",
+                "minimums above 7\u00b0C, at least 25% with a bachelor degree, vegetation ",
+                "types together above 10%). You get every suburb that meets all of them; ",
+                "they aren't scored or ranked."),
+        tags$li(tags$b("Compare"), ": put up to 10 suburbs side by side, with match scores ",
+                "and the same charts for all of them.")),
+      tags$h5("What is a match score?"),
+      tags$p("Each pair of suburbs is compared across ", length(all_dim_codes),
+             " characteristics. Each characteristic gets a similarity from 0 (as different ",
+             "as possible) to 1 (identical), using Bray-Curtis or scaled Euclidean distance ",
+             "depending on the data. The match % summarises how closely a suburb fits the ",
+             "characteristics you've selected; it isn't a prediction of whether you'll like it."),
+      tags$h5(sprintf("The %d characteristics, in four themes", length(all_dim_codes))),
+      tags$div(style = "font-size: 12px;", theme_lists),
+      tags$h5("How the match is calculated"),
+      tags$p("In Match settings, each characteristic can be switched off or given a target: ",
+             tags$b("Similar"), " (scores highest at identical), ",
+             tags$b("Mostly similar"), " (peaks at 0.7), ",
+             tags$b("Mostly different"), " (peaks at 0.3) or ",
+             tags$b("Different"), " (scores highest when as different as possible). ",
+             "Scores fall away linearly from each target. The overall match is the average ",
+             "of each theme's mean, so every theme with at least one characteristic switched ",
+             "on counts equally, however many characteristics it has. A theme with none ",
+             "switched on is left out rather than counted as 0."),
+      tags$h5("Several reference suburbs"),
+      tags$p(tags$b("Closest to any one reference"), " finds suburbs strongly similar to at ",
+             "least one of them (best individual fit). ",
+             tags$b("Closest to all on average"), " finds suburbs similar to all of them ",
+             "(mean across references)."),
+      tags$h5("Refine: regions, filters and location"),
+      tags$p(tags$b("Where"), " limits results to states, capital-city areas or SA4 regions ",
+             "without changing scores. ", tags$b("Filters"), " (coast, terrain, remoteness) keep ",
+             "only the chosen categories and drop that characteristic from the score, since every ",
+             "result then shares it."),
+      tags$p(tags$b("Near a place"), ": pick up to 3 suburbs to stay close to. In Similar ",
+             "and Dream, each result's similarity is multiplied by a proximity factor: 1 at ",
+             "the place, 0.5 at the chosen radius and close to 0 at twice the radius, raised to ",
+             "the strength setting. Results are ranked by that combined score, but the match % ",
+             "shown stays pure similarity, with the straight-line distance alongside. In Find by ",
+             "criteria, only suburbs within the radius are kept."),
+      tags$h5("Find by criteria"),
+      tags$p("Each criterion has a slider over the spread of all suburbs, with the Australian ",
+             "25th percentile, median and 75th percentile marked. Leaving a slider end at its ",
+             "limit means no limit on that side. Weather criteria must hold in every month you ",
+             "choose. \u201cCategories added together\u201d filters on the total share of the ",
+             "categories you pick (e.g. several vegetation types)."),
+      tags$h5("Data"),
+      tags$p(style = "font-size: 12px;",
+             "Census 2021 (ABS), federal election 2025 results, climate grids, vegetation and ",
+             "land-cover mapping, and OpenStreetMap amenities, summarised to 2021 suburbs (SAL). ",
+             "Suburbs with very few residents can't be compared."),
       footer = modalButton("Close")
     ))
   })
@@ -4449,7 +4433,8 @@ server <- function(input, output, session) {
       tags$div(style = "font-weight: bold; font-size: 11px; margin-bottom: 4px;",
                "Closest matches"),
       tags$div(style = "font-size: 9px; color: #888; margin-bottom: 6px;",
-               "Click a suburb name for its full breakdown"),
+               "Match % = how closely each suburb fits the characteristics you've ",
+               "selected (100% = identical). Click a name for its breakdown."),
       rows
     )
   })
@@ -4469,7 +4454,7 @@ server <- function(input, output, session) {
     p <- ggplot(df, aes(val, forcats::fct_rev(label), fill = label)) +
       geom_col(width = 0.75) +
       geom_vline(xintercept = match_val, linetype = "dashed",
-                 colour = "#333", linewidth = 0.5) +
+                 colour = "#333333", linewidth = 0.5) +
       scale_fill_manual(values = setNames(df$colour, df$label)) +
       scale_x_continuous(limits = c(0, 1.05),
                          breaks = c(0, 0.5, 1),
@@ -4687,7 +4672,10 @@ server <- function(input, output, session) {
 
     tagList(
       tags$div(style = "font-size: 11px; color: #666; margin-bottom: 8px;",
-               sprintf("Showing top %d matches. Dashed line = match score.",
+               sprintf(paste("Showing the top %d matches. Match %% = how closely each suburb",
+                             "fits the characteristics you've selected (100%% = identical);",
+                             "it isn't a prediction of whether you'll like it.",
+                             "Dashed line on each chart = the match score."),
                        nrow(top))),
       rows
     )
@@ -4825,6 +4813,24 @@ server <- function(input, output, session) {
         "Add criteria above; matching suburbs appear on the map. Click one to see its profile."))
       return(build_profile_panel(code, ref_codes = character(0), show_header = TRUE,
                                  anchor_text = anchor_note(code, anchor_state())))
+    }
+    dream <- dream_refs_active()
+    if (identical(input$app_mode, "dream") && !is.null(dream)) {
+      md   <- match_df()
+      code <- clicked_suburb() %||% (if (!is.null(md) && nrow(md)) md$suburb_b[1])
+      picks <- dream$theme_refs
+      head_box <- tags$div(class = "dream-side-head",
+        tags$div(class = "dream-side-title", icon("wand-magic-sparkles"), " Your dream suburb"),
+        tags$ul(lapply(names(dream_theme_labels), function(t) {
+          cd <- picks[[t]] %||% character(0)
+          tags$li(tags$b(dream_theme_labels[[t]], ": "),
+                  if (length(cd)) paste(vapply(cd, anchor_name, ""), collapse = ", ")
+                  else tags$span(style = "color:#999;", "not used"))
+        })))
+      if (is.null(code)) return(head_box)
+      return(tagList(head_box,
+        build_profile_panel(code, ref_codes = active_ref_codes(), show_header = TRUE,
+                            theme_refs = picks)))
     }
     code <- clicked_suburb() %||% active_ref_codes()[1]
     if (is.null(code)) {
@@ -4982,10 +4988,11 @@ server <- function(input, output, session) {
       cached <- raw_cache[[code]]
       if (is.null(cached)) {
         cached <- load_raw(code)
-        raw_cache[[code]] <- cached
+        if (!is.null(cached)) raw_cache[[code]] <- cached
       }
       cached
-    }), ref_codes)
+    }), ref_codes) |> compact()
+    if (!length(rs_list)) return(NULL)
 
     med_list <- map(rs_list, function(rs) {
       raw_cols <- grep("^raw_", names(rs), value = TRUE)
