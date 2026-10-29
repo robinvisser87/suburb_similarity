@@ -2085,6 +2085,17 @@ ui <- function(request) fluidPage(
         $('body').removeClass('mode-similar mode-dream mode-compare')
                  .addClass('mode-' + e.value);
     });
+    // Re-fit the map after it becomes visible again (see map_refit on the
+    // server): resize Leaflet to its now-visible container first.
+    $(document).on('shiny:connected', function() {
+      Shiny.addCustomMessageHandler('map_refit', function(bb) {
+        setTimeout(function() {
+          var w = HTMLWidgets.find('#map'); if (!w) return;
+          var m = w.getMap(); m.invalidateSize();
+          m.fitBounds([[bb[1], bb[0]], [bb[3], bb[2]]]);
+        }, 150);
+      });
+    });
     // Refine strip: toggle, remembered across visits in the browser.
     function stRefineSet(open, animate) {
       var s = $('#refine-strip');
@@ -2500,6 +2511,8 @@ server <- function(input, output, session) {
   # the map_zoom dropdown but read directly (no UI round-trip) so the
   # auto-fit check below can never race against a stale/unset input$map_zoom.
   zoom_mode       <- reactiveVal("auto")
+  last_fit        <- reactiveVal(NULL)   # last auto-fit bounds (xmin, ymin, xmax, ymax)
+  map_fit_top_n   <- 5                   # auto zoom fits to this many top matches
 
   # Which top-level page is showing: "main" (search/map/list) or
   # "compare" (the suburb-comparison page). A separate page, not a
@@ -3746,8 +3759,10 @@ server <- function(input, output, session) {
       bb <- c(min(lng, na.rm = TRUE), min(lat, na.rm = TRUE),
               max(lng, na.rm = TRUE), max(lat, na.rm = TRUE))
     }
-    if (isolate(zoom_mode()) == "auto" && all(is.finite(bb)))
+    if (isolate(zoom_mode()) == "auto" && all(is.finite(bb))) {
       proxy |> fitBounds(bb[1], bb[2], bb[3], bb[4])
+      last_fit(bb)
+    }
   })
 
   observeEvent(input$map_marker_click, {
@@ -4109,33 +4124,26 @@ server <- function(input, output, session) {
                 labels = paste0("#", legend_ranks),
                 title  = "Rank", opacity = 0.9)
 
-    # if zoom is in Auto mode, fit to the GCCSA holding the most matches
-    # (single dominant cluster usually tells the most useful story).
-    # Falls back to the full top-N bbox if no GCC info is available.
+    # Auto zoom: fit to the top 5 matches (by rank), so the map shows where
+    # the best matches are. Change map_fit_top_n to widen or narrow this.
     if (isolate(zoom_mode()) == "auto" && nrow(shp_sub) > 0) {
-      top_gcc <- shp_sub$suburb_code_2021 |>
-        (\(codes) gcc_lookup_full[codes])() |>
-        unname() |>
-        (\(v) v[!is.na(v) & nzchar(v)])() |>
-        table()
-      if (length(top_gcc) > 0) {
-        winner_gcc <- names(top_gcc)[which.max(top_gcc)]
-        winner_codes <- shp_sub$suburb_code_2021[
-          gcc_lookup_full[shp_sub$suburb_code_2021] == winner_gcc]
-        shp_winner <- shp_sub |> filter(suburb_code_2021 %in% winner_codes)
-        if (nrow(shp_winner) > 0) {
-          bb <- as.numeric(st_bbox(shp_winner))
-          proxy |> fitBounds(bb[1], bb[2], bb[3], bb[4])
-        } else {
-          bb <- as.numeric(st_bbox(shp_sub))
-          proxy |> fitBounds(bb[1], bb[2], bb[3], bb[4])
-        }
-      } else {
-        bb <- as.numeric(st_bbox(shp_sub))
-        proxy |> fitBounds(bb[1], bb[2], bb[3], bb[4])
-      }
+      shp_fit <- shp_sub |> filter(rank <= map_fit_top_n)
+      if (!nrow(shp_fit)) shp_fit <- shp_sub
+      bb <- as.numeric(st_bbox(shp_fit))
+      proxy |> fitBounds(bb[1], bb[2], bb[3], bb[4])
+      last_fit(bb)
     }
   })
+
+  # The map can't fit itself properly while hidden (List view, Compare or
+  # another mode), so re-fit to the last auto bounds whenever it becomes
+  # visible again. Done in the browser so it runs after Leaflet resizes.
+  observeEvent(list(input$view_mode, input$app_mode), {
+    bb <- last_fit()
+    if (identical(input$view_mode, "map") && !identical(input$app_mode, "compare") &&
+        !is.null(bb) && zoom_mode() == "auto")
+      session$sendCustomMessage("map_refit", as.list(bb))
+  }, ignoreInit = TRUE)
 
   # --- "What's this suburb like" overview --------------------------------
   # Two-part summary:
