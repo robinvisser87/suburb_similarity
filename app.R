@@ -2414,7 +2414,7 @@ server <- function(input, output, session) {
   # input$map_zoom, which used to switch auto-fit off after any zoom.)
   zoom_mode       <- reactiveVal("auto")
   last_fit        <- reactiveVal(NULL)   # last auto-fit bounds (xmin, ymin, xmax, ymax)
-  map_fit_top_n   <- 5                   # auto zoom fits to this many top matches
+  map_fit_top_n   <- 10                   # auto zoom fits to this many top matches
 
   # Which top-level page is showing: "main" (search/map/list) or
   # "compare" (the suburb-comparison page). A separate page, not a
