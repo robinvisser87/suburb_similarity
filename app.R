@@ -2420,7 +2420,7 @@ server <- function(input, output, session) {
   # input$map_zoom, which used to switch auto-fit off after any zoom.)
   zoom_mode       <- reactiveVal("auto")
   last_fit        <- reactiveVal(NULL)   # last auto-fit bounds (xmin, ymin, xmax, ymax)
-  map_fit_top_n   <- 5                   # auto zoom fits to this many top matches
+  map_fit_top_n   <- 10                  # auto zoom fits to this many top matches
 
   # Which top-level page is showing: "main" (search/map/list) or
   # "compare" (the suburb-comparison page). A separate page, not a
@@ -4117,7 +4117,7 @@ server <- function(input, output, session) {
                 labels = paste0("#", legend_ranks),
                 title  = "Rank", opacity = 0.9)
 
-    # Auto zoom: fit to the top 5 matches (by rank), so the map shows where
+    # Auto zoom: fit to the top 10 matches (by rank), so the map shows where
     # the best matches are. Change map_fit_top_n to widen or narrow this.
     if (isolate(zoom_mode()) == "auto" && nrow(shp_sub) > 0) {
       shp_fit <- shp_sub |> filter(rank <= map_fit_top_n)
@@ -4813,6 +4813,12 @@ server <- function(input, output, session) {
   observeEvent(dream_refs_active(), {
     clicked_suburb(NULL)
   }, ignoreNULL = FALSE, ignoreInit = TRUE)
+
+  # A new reference also drops any earlier click, so the charts switch to
+  # the new reference instead of staying on a suburb picked on the map.
+  observeEvent(current_ref(), {
+    clicked_suburb(NULL)
+  }, ignoreInit = TRUE)
 
   output$map_side_panel <- renderUI({
     if (identical(input$app_mode, "criteria")) {
